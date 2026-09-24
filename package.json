@@ -1,0 +1,117 @@
+{
+  "name": "dsh-connect-comate",
+  "displayName": "DSH Connect WPS Comate",
+  "description": "Connect the locally signed-in WPS Comate account to DeepSeek Harness as a model provider, via a secure loopback shim (reverse-proxy style).",
+  "version": "0.2.0",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "wps",
+    "comate",
+    "model-provider"
+  ],
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "bin": {
+    "dsh-connect-comate": "lib/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bakasbk/dsh-connect-comate.git"
+  },
+  "homepage": "https://github.com/bakasbk/dsh-connect-comate#readme",
+  "bugs": {
+    "url": "https://github.com/bakasbk/dsh-connect-comate/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1-rc.1 <5.0.0 || >=4.0.2 <5.0.0",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.1 <0.2.0 || >=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/schemastery": ">=3.18.3 <4.0.0",
+    "@earendil-works/pi-ai": ">=0.85.0 <0.86.0",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+    "@deepseek-ai/dsh-client-locale": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-settings": "0.1.7-rc.1",
+    "@deepseek-ai/schemastery": "3.18.4",
+    "@earendil-works/pi-ai": ">=0.85.0 <0.86.0",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.31",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

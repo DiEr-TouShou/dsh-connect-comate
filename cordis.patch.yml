@@ -1,0 +1,6 @@
+# Register the WPS Comate provider without changing the profile's default
+# model. The plugin reuses the locally signed-in WPS Comate client's config
+# (~/.wpscomate/config.json); no separate OAuth flow is started.
+- insert:
+    - id: dsh-connect-comate
+      name: dsh-connect-comate

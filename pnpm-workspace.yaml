@@ -1,0 +1,16 @@
+packages:
+  - .
+# 0.1.7 线的每个包都把自己的兄弟包声明成精确 peer（`@deepseek-ai/dsh-invariants`
+# 就是 `0.1.7-rc.1`），而 pnpm 从 v8 起默认不安装缺失的 peer —— 结果是「直接依赖
+# 升到了 0.1.7，被依赖者仍解析到 0.1.5-rc.2」，开发树里同时躺着两条线的实现。
+# 那正是 workbuddy 2.0.12 记下的教训：开发环境与用户环境不一致，缺陷就会从评审
+# 与 CI 之间穿过去。这里让 pnpm 按各自声明装齐 peer，使开发树与宿主版本一致。
+autoInstallPeers: true
+overrides:
+  # 0.1.7 的 settings 写入门要求插件 Config 把可写字段标成 volatile，而 volatile()
+  # 是 schemastery 3.18.3 才有的方法。开发环境此前锁在 3.18.2（没有该方法），
+  # asVolatile() 因此退化成 identity no-op —— 那条分支永远不会被执行，CI 与真机
+  # 看到的不是同一份行为。这里把开发环境与 dependencies 里钉住的运行期版本对齐，
+  # 让「开发版 = 用户版」；no-op 分支由 tests/bridge.spec.ts 显式钉死，不再依赖
+  # 「装到的版本恰好很旧」顺带覆盖。
+  '@deepseek-ai/schemastery': 3.18.4
