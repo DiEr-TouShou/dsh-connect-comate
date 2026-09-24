@@ -22,15 +22,16 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ComateCredential } from './auth.ts'
+import type { UpstreamErrorKind } from './bridge.ts'
 
-/** Upstream failure classes the shim maps onto distinct HTTP answers. */
-export type UpstreamErrorKind =
-  | 'hard_credit'
-  | 'soft_rate'
-  | 'session_dead'
-  | 'not_found'
-  | 'server'
-  | 'client'
+/**
+ * Upstream failure classes the shim maps onto distinct HTTP answers.
+ *
+ * The union itself lives in `./bridge.ts` so the browser half can name these
+ * classes without importing this module (and its `node:crypto`). Re-exported
+ * here because this is where the classification happens.
+ */
+export type { UpstreamErrorKind } from './bridge.ts'
 
 /** Chat answer: either a live SSE response or a classified failure. */
 export type ComateChatResult =

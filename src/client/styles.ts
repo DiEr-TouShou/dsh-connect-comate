@@ -44,9 +44,10 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a8)}
 .dsm-comate-check{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:19px;color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:pointer}
 .dsm-comate-check input{margin-top:3px}
-.dsm-comate-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+.dsm-comate-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;flex-wrap:wrap}
 .dsm-comate-saved{margin:0;font-size:12.5px;color:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-comate-error{margin:0;font-size:12.5px;color:var(--dsw-alias-state-error-primary,#ef4444)}
+.dsm-comate-info{margin:0;font-size:12.5px;color:var(--dsw-alias-label-tertiary,#9aa0a8)}
 .dsm-comate-models{display:flex;flex-direction:column;gap:8px}
 .dsm-comate-models-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .dsm-comate-models-title{margin:0;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}

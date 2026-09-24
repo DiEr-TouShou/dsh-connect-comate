@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.0 (2026-09-24)
+
+### Features
+
+- **卡片新增「刷新模型列表」。** 宿主此前只在启动时、以及 `configFile` 变化时才重新发现模型，于是「在 Comate 桌面端刚登录/刚换账号」必须重启 DSH 才能看到新目录。新增动作路由 `POST /plugins/dsh-connect-comate/__refresh`：重读本机 Comate 配置、刷新内存快照并返回与 `__catalog` 同形状的结果。按钮放在「启用的模型」标题行的工具区，带进行中状态；未登录时给出明确提示而不是静默无变化。它**不写任何文件**——落盘仍然只发生在用户真的点保存时。
+
+- **卡片新增「测试连接」。** 新增动作路由 `POST /plugins/dsh-connect-comate/__check`：发一次最小请求（`max_tokens: 8`、`stream: true`、单条 `ping`），把结果（成功 / HTTP 状态 / 错误分类 / 脱敏后的上游原文）回报给卡片。两处关键设计：
+
+  - **可以测未保存的草稿 sid。** 请求体可带 `wpsSid` / `cookieOnly`，由 `ComateCredentialStore.current(override)` 只作用于那一次读取——草稿**不落盘**，也不写进 store 实例字段（否则两个并发探测会互相污染，而且「按一下测试」会悄悄改变插件实际使用的东西）。这样首次配置就能「先测再存」，不用先存一个可能错的 sid。
+  - **命令行与卡片共用一份实现。** 最小请求从 `src/bin.ts` 抽到 `src/check.ts`，`dsh plugin exec dsh-connect-comate check` 与卡片按钮走同一份代码：两处各写一遍的话，「卡片测通、命令行测不通」会变成无法复现的玄学问题。
+
+- **开放思考等级（thinking level）。** 适配器此前在 `toPiModel` 里写死 `reasoning: false`，而 `dsh-llm-pi-ai` 的 `reasoningInfo()` 在 `!model.reasoning` 时返回空对象——所以模型选择器**根本不渲染 effort 菜单**。现在声明 `reasoning: true` + `thinkingLevelMap` + `compat: { supportsReasoningEffort: true, thinkingFormat: 'openai' }`，选择器出现思考等级菜单。
+
+  映射**全部来自本机实测**（2026-09，`llmproxy/v1/user/chat/completions`），不是猜的：
+
+  | 结论 | 证据 |
+  | --- | --- |
+  | 整条 OpenAI `reasoning_effort` 词汇表都被接受 | `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` 全部 HTTP 200，无一 400 |
+  | 不传参数时模型**默认就在思考** | 基线每次都返回 `reasoning_content` |
+  | `reasoning_effort: 'off'` 真的能关掉思考 | `reasoning_content` 归零，5 个模型（deepseek-v4-flash/-pro、MiniMax-M3、mimo-v2.5、mimo-v2.5-pro）一致 |
+  | 桌面端自己发的就是 `reasoning_effort: "high"` | `~/.wpscomate/agent/logs/app.log` 的 `[cloud][chat]` 请求体 |
+
+  提供 **minimal / low / medium / high** 四档，`xhigh` / `max` 钉 `null`（上游接受但本机无法验证它们与 `high` 的语义差别，不做没人量过的承诺）。
+
+  - **`off` 不提供——这是一个刻意的诚实取舍。** `dsh-llm-pi-ai` 的 `profileOptions()` 会把 `off` 改写成「不传该选项」（`reasoning === 'off' ? undefined : reasoning`，`lib/index.js:1671`，输入来自 `:1847` 的 `resolveReasoningLevel(model, options.reasoningEffort ?? profile.reasoning)`）。也就是说 `off` 永远到不了 pi-ai，`thinkingLevelMap.off` 不会被查；请求不带任何 reasoning 参数，上游保持思考开启，而选择器却显示「off」。那是**对着行为撒谎**，所以 `off` 钉 `null` 不出现，真正的「不发送参数」由选择器自带的「provider default」承担。
+
+### Tests
+
+- 测试 77 → 125 例（11 个文件）。新增：
+  - `check.spec.ts`——最小请求逐字断言（`max_tokens: 8` / `stream: true` / 单条 ping）、成功与各类失败的映射、流被释放、`safeMessage` 对 JWT / `token=` / `wps_sid=` 的脱敏与 500 字截断。
+  - `client-actions.spec.ts`——两个动作的 fetch 形状（method / headers / `credentials: same-origin` / body）、路由拒绝时抛错、**探测失败时 resolve 而不是 reject**、body 可 `structuredClone`。
+  - `thinking.spec.ts`——直接对**真实模型描述符**断言（不是复制一份）：`getSupportedThinkingLevels()` 恰好是 minimal/low/medium/high、不含 off/xhigh/max、未支持等级会被 clamp；并用 stub fetch 驱动 pi-ai 的 `openAICompletionsApi` 断言**线上真实字段**：选 high 带 `reasoning_effort: "high"`、选 low/minimal 逐字发送、provider default **完全不带**该字段。
+  - `catalog-route.spec.ts` 扩到 23 例——三个路由的方法/回环/JSON content-type 守卫、`__refresh` 恰好调用一次且快照在刷新**之后**读取、`__check` 透传草稿字段并丢弃类型不对的字段、坏 JSON 返回 400 而非 500、响应体不含凭据。
+  - `auth.spec.ts`——草稿覆盖只作用于那一次读取、空白 sid 视为未提供、`cookieOnly` 同样一次性、不干扰 setter 写入的已保存值。
+
+### Packaging
+
+- 版本提到 0.3.0（0.2.0 已发布）。
+
 ## 0.2.0 (2026-09-24)
 
 ### Features

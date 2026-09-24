@@ -22,20 +22,13 @@ import {
   defaultComateHome,
   defaultConfigCandidates,
 } from './auth.ts'
+import { runComateCheck, safeMessage } from './check.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import { COMATE_CONNECT_VERSION } from './version.ts'
 
 type Action = 'check' | 'doctor' | 'logout' | 'status'
 
 const JSON_SCHEMA_VERSION = 1
-
-/** Remove token-like strings from an unexpected diagnostic message. */
-function safeMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
-    .replace(/(\b(?:code|token|refresh_token|access_token|apiKey|api_key)=)[^&\s]+/giu, '$1[redacted]')
-}
 
 function printHelp(): void {
   process.stdout.write([
@@ -126,6 +119,10 @@ async function status(jsonOutput: boolean): Promise<number> {
  * Send one minimal chat request to verify the resolved credential.
  * Reads the manual sid from the store (options/env), so it doubles as the
  * fastest way to validate a pasted wps_sid before using it in DSH.
+ *
+ * The request itself lives in `./check.ts`, shared with the plugin card's
+ * 「测试连接」 action: the command line and the button must not be able to
+ * disagree about what "the connection works" means.
  */
 async function check(): Promise<number> {
   const store = makeStore()
@@ -141,19 +138,16 @@ async function check(): Promise<number> {
     process.stderr.write('dsh-connect-comate: no models in credential; cannot check\n')
     return 1
   }
-  const client = new ComateUpstreamClient()
-  const body = JSON.stringify({
+  const outcome = await runComateCheck({
+    credential,
+    client: new ComateUpstreamClient(),
     model: model.id,
-    messages: [{ role: 'user', content: 'ping' }],
-    stream: true,
-    max_tokens: 8,
   })
-  const result = await client.chatStream(credential, body)
-  if (result.ok) {
+  if (outcome.ok) {
     process.stdout.write(`OK: upstream accepted the credential (HTTP 200, SSE stream started; model=${model.id})\n`)
     return 0
   }
-  process.stdout.write(`FAIL: HTTP ${result.status} [${result.kind}]: ${result.message.slice(0, 300)}\n`)
+  process.stdout.write(`FAIL: HTTP ${outcome.status} [${outcome.kind}]: ${(outcome.message ?? '').slice(0, 300)}\n`)
   process.stdout.write('If the cookie looks right and this still 401s, try cookieOnly (cookie-only auth) or re-copy the sid.\n')
   return 1
 }

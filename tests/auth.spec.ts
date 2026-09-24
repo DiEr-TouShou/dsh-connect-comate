@@ -1,8 +1,11 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   COMATE_DEFAULT_CONTEXT_WINDOW,
   COMATE_HOME_DIRNAME,
+  ComateCredentialStore,
   defaultComateHome,
   parseComateConfig,
   parseComateModel,
@@ -75,5 +78,56 @@ describe('defaultComateHome', () => {
   it('honors the env override and defaults to ~/.wpscomate', () => {
     expect(defaultComateHome({ WPS_COMATE_HOME: 'D:/comate' }, 'C:/Users/u')).toBe('D:/comate')
     expect(defaultComateHome({}, 'C:/Users/u')).toBe(join('C:/Users/u', COMATE_HOME_DIRNAME))
+  })
+})
+
+/**
+ * The one-shot override is what lets the card's 「测试连接」 probe an UNSAVED sid.
+ * Its whole contract is "this read, and only this read" — a leak into the store
+ * would make pressing a test button silently change what the plugin uses.
+ */
+describe('ComateCredentialStore.current override', () => {
+  /** A store pointed at a real temp config carrying the sample document. */
+  function storeWith(options: { wpsSid?: string } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'comate-auth-'))
+    const configFile = join(dir, 'config.json')
+    writeFileSync(configFile, SAMPLE_CONFIG, 'utf8')
+    return new ComateCredentialStore({ configFile, ...options })
+  }
+
+  it('applies a draft sid to that read only', async () => {
+    const store = storeWith()
+    // The saved value is the config's own cookie.
+    expect((await store.current())?.cookie).toBe('wps_sid=abc')
+    expect((await store.current({ wpsSid: 'draft-sid' }))?.cookie).toBe('wps_sid=draft-sid')
+    // …and the draft did not stick.
+    expect((await store.current())?.cookie).toBe('wps_sid=abc')
+  })
+
+  it('treats a blank or whitespace draft sid as absent', async () => {
+    const store = storeWith()
+    expect((await store.current({ wpsSid: '' }))?.cookie).toBe('wps_sid=abc')
+    expect((await store.current({ wpsSid: '   ' }))?.cookie).toBe('wps_sid=abc')
+  })
+
+  it('applies a draft cookieOnly to that read only', async () => {
+    const store = storeWith()
+    expect((await store.current({ cookieOnly: true }))?.authHeader).toBe(false)
+    expect((await store.current())?.authHeader).toBe(true)
+  })
+
+  it('keeps a saved sid when the draft omits one', async () => {
+    const store = storeWith({ wpsSid: 'saved-sid' })
+    expect((await store.current({ cookieOnly: false }))?.cookie).toBe('wps_sid=saved-sid')
+  })
+
+  it('does not disturb the saved overrides set through the setters', async () => {
+    const store = storeWith()
+    store.setWpsSid('saved-sid')
+    store.setCookieOnly(true)
+    expect((await store.current({ wpsSid: 'draft-sid' }))?.cookie).toBe('wps_sid=draft-sid')
+    // Back to the saved state, untouched by the draft.
+    expect((await store.current())?.cookie).toBe('wps_sid=saved-sid')
+    expect((await store.current())?.authHeader).toBe(false)
   })
 })

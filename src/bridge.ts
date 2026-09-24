@@ -54,6 +54,25 @@ export const COMATE_SETTINGS_NS = 'comate'
  */
 export const COMATE_CATALOG_PATH = '/plugins/dsh-connect-comate/__catalog'
 
+/**
+ * Action route: re-read the local Comate config and republish the directory.
+ *
+ * The host discovers models at startup and when `configFile` changes; a model
+ * the user just added (or signed into) in the desktop client would otherwise
+ * need a DSH restart. A POST because it performs work, even though it writes
+ * nothing anywhere.
+ */
+export const COMATE_REFRESH_PATH = '/plugins/dsh-connect-comate/__refresh'
+
+/**
+ * Action route: send one minimal chat request to verify the credential.
+ *
+ * Optionally carries an UNSAVED draft `wpsSid` / `cookieOnly` so the card can be
+ * tested before saving. The draft lives only in that one request: nothing
+ * persists it and the answer never echoes it back.
+ */
+export const COMATE_CHECK_PATH = '/plugins/dsh-connect-comate/__check'
+
 /** Card-facing model directory entry. */
 export interface ComatePersistedModel {
   id: string
@@ -77,6 +96,52 @@ export interface ComateSettingsValue {
   wpsSid?: string
   cookieOnly?: boolean
   enabledModelIds?: string[]
+}
+
+/**
+ * Upstream failure classes the shim maps onto distinct HTTP answers.
+ *
+ * Declared here rather than in `./upstream.ts` so this module stays dependency
+ * free — the browser half renders these names, and a type it imports must not
+ * drag a `node:crypto` import into the client bundle. `./upstream.ts`
+ * re-exports it, so the host-side name is unchanged.
+ */
+export type UpstreamErrorKind =
+  | 'hard_credit'
+  | 'soft_rate'
+  | 'session_dead'
+  | 'not_found'
+  | 'server'
+  | 'client'
+
+/** The status route's answer. Deliberately contains no credential of any kind. */
+export interface ComateCatalogAnswer {
+  signedIn: boolean
+  providerRegistered: boolean
+  models: readonly ComatePersistedModel[]
+}
+
+/** Why a probe could not run at all (as opposed to running and failing). */
+export type ComateCheckReason = 'no-credential' | 'no-model'
+
+/** What one probe request observed. */
+export interface ComateCheckOutcome {
+  /** Whether the upstream accepted the credential and started a stream. */
+  ok: boolean
+  /**
+   * Why the probe never reached the network. Set by the host when it could not
+   * assemble a credential or pick a model; absent whenever the request ran, even
+   * if the upstream then refused it.
+   */
+  reason?: ComateCheckReason
+  /** The model the probe used. */
+  model?: string
+  /** HTTP status, present when the upstream answered non-2xx. */
+  status?: number
+  /** Classified failure kind, present when the upstream answered non-2xx. */
+  kind?: UpstreamErrorKind
+  /** Redacted, length-capped upstream excerpt or transport error. */
+  message?: string
 }
 
 /**

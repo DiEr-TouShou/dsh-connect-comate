@@ -100,7 +100,7 @@ export function originIsLoopback(origin: string | undefined): boolean {
 }
 
 /** Chat-completion POSTs must carry a JSON body type (simple-request CSRF drops here). */
-function isJsonContentType(req: IncomingMessage): boolean {
+export function isJsonContentType(req: IncomingMessage): boolean {
   const type = req.headers['content-type']
   return typeof type === 'string' && type.trim().toLowerCase().startsWith('application/json')
 }

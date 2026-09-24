@@ -62,7 +62,25 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 - 提供「全选 / 全不选」快捷按钮；
 - 语义与 workbuddy 一致：**全部勾选（或保存为空）= 显示全部模型**；保存过非空选择后，只显示勾选项；
 - 选择随设置持久化（`enabledModelIds`），保存后无需重启即生效；
+- **「刷新模型列表」** 让宿主重读本机 Comate 配置（在桌面端刚登录/刚换账号时用，不必重启 DSH）；
 - 模型目录由宿主只读路由 `GET /plugins/dsh-connect-comate/__catalog` 提供（响应含 `signedIn`、`providerRegistered`、`models`，**不含任何凭据**）。宿主不再把目录回写进设置：0.1.7 上设置写入的目标是用户手写的 `cordis.patch.yml`，宿主每次发现变化都去重写它会破坏该文件的注释与格式。
+
+## 测试连接
+
+卡片动作行的「测试连接」发**一次最小请求**（`max_tokens: 8`、`stream: true`、单条 `ping`）验证凭据，结果就地显示（成功并给出所用模型 / 失败并给出 HTTP 状态、错误分类与脱敏后的上游原文）。
+
+- 用的是**当前草稿**的 `wps_sid` 与 `cookieOnly`，所以**可以先测再存**——粘错值不会先写进设置文档；草稿只作用于那一次请求，不落盘。
+- 与命令行 `dsh plugin exec dsh-connect-comate check` **共用同一份实现**（`src/check.ts`），两边不会给出不一致的结论。
+- 探测用「启用中的第一个模型」（没有勾选任何模型时即目录第一个），也就是你实际会用到的那条路。
+
+## 思考等级（thinking level）
+
+模型选择器里为 comate 模型提供思考等级：**minimal / low / medium / high**，以及选择器自带的「provider default」。
+
+映射来自本机实测（2026-09）：上游接受整条 OpenAI `reasoning_effort` 词汇表；不传参数时模型**默认就在思考**（基线每次都返回 `reasoning_content`）；`reasoning_effort` 的取值会原样发给上游。
+
+> **「关闭思考」当前做不到，因此没有提供这个选项。** `dsh-llm-pi-ai` 会把 `off` 改写成「不传该选项」（`profileOptions()`：`reasoning === 'off' ? undefined : reasoning`），所以 `off` 永远到不了 pi-ai——请求不带参数、上游保持思考开启，而选择器却显示「off」。与其给一个名不副实的开关，不如让「provider default」如实表达「不发送参数」。（实测 `reasoning_effort: 'off'` 本身确实能让 `reasoning_content` 归零，是这个中间层拦住了它。）
+
 
 ## 安装
 
@@ -104,19 +122,31 @@ dsh plugin --profile <web|desktop|dsh-tui> exec dsh-connect-comate logout   # v0
 node lib/bin.js doctor
 ```
 
-### 只读状态路由
+### 只读状态路由与动作路由
 
-宿主还暴露一个本机只读路由，便于在浏览器外确认「宿主那一半」到底装上了没有：
+宿主暴露三条本机路由，便于在浏览器外确认「宿主那一半」到底装上了没有：
 
 ```sh
+# 状态（只读）
 curl http://127.0.0.1:<DSH web 端口>/plugins/dsh-connect-comate/__catalog
 # {"signedIn":true,"providerRegistered":true,"models":[...]}
+
+# 刷新模型目录（重读本机 Comate 配置，不写任何文件）
+curl -X POST -H 'content-type: application/json' \
+  http://127.0.0.1:<DSH web 端口>/plugins/dsh-connect-comate/__refresh
+
+# 测试连接（最小请求；可带未保存的草稿凭据，仅作用于这一次）
+curl -X POST -H 'content-type: application/json' \
+  -d '{"wpsSid":"粘贴sid值","cookieOnly":false}' \
+  http://127.0.0.1:<DSH web 端口>/plugins/dsh-connect-comate/__check
+# {"ok":true,"model":"41000207/deepseek/deepseek-v4-flash//public"}
 ```
 
 - `providerRegistered` 为 `false` 而 `signedIn` 为 `true`，说明 loopback 监听起来了、但 `comate`
   provider 没能注册进 harness 注册表——此时 DSH 模型选择器里不会有任何 Comate 模型（宿主日志里会有
   `provider registration failed`）。
-- 只接受 `GET`，且 Host 与 Origin 必须是回环地址；响应**不含任何凭据**。
+- 三条路由都只接受回环 Host + 回环 Origin；两条 POST 还要求 `content-type: application/json`
+  （跨站表单发不出这个头，等于砍掉简单请求 CSRF）。响应**不含任何凭据**。
 
 ## 开发
 

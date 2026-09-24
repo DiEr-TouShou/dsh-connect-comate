@@ -20,9 +20,13 @@
  */
 
 import {
+  COMATE_CHECK_PATH,
   COMATE_ENTRY_ID,
+  COMATE_REFRESH_PATH,
   COMATE_SETTINGS_NS,
   unwrapVolatile,
+  type ComateCatalogAnswer,
+  type ComateCheckOutcome,
   type ComateSettingsValue,
 } from '../bridge.ts'
 
@@ -270,4 +274,67 @@ export async function writeComateSettings(
       'settings field "enabledModelIds" was not persisted',
     )
   }
+}
+
+/**
+ * POST one JSON body to a host action route and parse its answer.
+ *
+ * Both actions are same-origin loopback calls, so they carry the session
+ * credentials but never a plugin-issued token: the host's own gates (loopback
+ * Host + loopback Origin + JSON content type) are the authorization.
+ *
+ * @param path - the action route.
+ * @param body - the JSON body, or undefined for an empty POST.
+ * @returns the parsed answer.
+ * @throws {Error} with the route's own error text when it refuses the request.
+ */
+async function postAction<T>(path: string, body?: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body ?? {}),
+  })
+  if (!response.ok) {
+    // A route that answers with a reason is more useful than its status code
+    // alone; fall back to the code when the body is not the expected shape.
+    let detail = `HTTP ${response.status}`
+    try {
+      const parsed = await response.json() as { error?: unknown }
+      if (typeof parsed?.error === 'string' && parsed.error !== '') detail = parsed.error
+    } catch {
+      // keep the status line
+    }
+    throw new Error(detail)
+  }
+  return await response.json() as T
+}
+
+/**
+ * Re-read the local Comate config on the host and return the fresh directory.
+ *
+ * The host discovers models at startup and when `configFile` changes, so a model
+ * the user just signed into in the desktop client would otherwise need a DSH
+ * restart.
+ *
+ * @returns the host's post-refresh snapshot.
+ */
+export async function refreshComateCatalog(): Promise<ComateCatalogAnswer> {
+  return postAction<ComateCatalogAnswer>(COMATE_REFRESH_PATH)
+}
+
+/**
+ * Send one minimal chat request through the host to verify the credential.
+ *
+ * `input` carries the card's UNSAVED draft values, so a sid can be tested before
+ * it is saved. The host applies them to that single request only; nothing is
+ * persisted and the answer never echoes them back.
+ *
+ * @param input - optional draft overrides.
+ * @returns the probe's outcome; a failed probe resolves, it does not reject.
+ */
+export async function testComateConnection(
+  input: { wpsSid?: string; cookieOnly?: boolean } = {},
+): Promise<ComateCheckOutcome> {
+  return postAction<ComateCheckOutcome>(COMATE_CHECK_PATH, input)
 }

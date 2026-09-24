@@ -17,13 +17,15 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { COMATE_CATALOG_PATH, type ComatePersistedModel } from '../bridge.ts'
+import { COMATE_CATALOG_PATH, type ComateCheckOutcome, type ComatePersistedModel } from '../bridge.ts'
 import { COMATE_PLUGIN_ICON } from './icon.ts'
 import { COMATE_CARD_CSS } from './styles.ts'
 import type { ComateSettingsKey } from './locales.ts'
 import {
   comateSettingsWritable,
   readComateValue,
+  refreshComateCatalog,
+  testComateConnection,
   writeComateSettings,
   type ComateSettingsForm,
 } from './settings-scope.ts'
@@ -57,6 +59,44 @@ if (typeof document !== 'undefined') {
     styleTag.textContent = COMATE_CARD_CSS
     document.head.appendChild(styleTag)
   }
+}
+
+/** One inline action result, shown next to the button that produced it. */
+interface CardNote {
+  tone: 'ok' | 'info' | 'error'
+  text: string
+}
+
+/** Turn a probe outcome into the single line the card shows. */
+function describeOutcome(
+  outcome: ComateCheckOutcome,
+  t: (key: ComateSettingsKey, params?: Record<string, unknown>) => string,
+): CardNote {
+  if (outcome.ok) {
+    return { tone: 'ok', text: t('row.testOk', { model: outcome.model ?? '' }) }
+  }
+  // `reason` is set only when the probe never reached the network; those two
+  // cases have actionable copy, unlike an upstream refusal.
+  if (outcome.reason === 'no-credential') return { tone: 'error', text: t('row.testNoCredential') }
+  if (outcome.reason === 'no-model') return { tone: 'error', text: t('row.testNoModel') }
+  return {
+    tone: 'error',
+    text: t('row.testFail', {
+      status: outcome.status ?? '-',
+      kind: outcome.kind ?? 'unknown',
+      message: outcome.message ?? '',
+    }),
+  }
+}
+
+/** Render one inline action result, toned by outcome. */
+function Note({ note }: { note: CardNote }) {
+  const className = note.tone === 'ok'
+    ? 'dsm-comate-saved'
+    : note.tone === 'error'
+      ? 'dsm-comate-error'
+      : 'dsm-comate-info'
+  return <p className={className}>{note.text}</p>
 }
 
 /** Narrow one entry of the catalog route's answer. */
@@ -94,6 +134,10 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const [saving, setSaving] = useState(false)
   const [savedFlash, setSavedFlash] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshNote, setRefreshNote] = useState<CardNote | undefined>(undefined)
+  const [testing, setTesting] = useState(false)
+  const [testNote, setTestNote] = useState<CardNote | undefined>(undefined)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -113,7 +157,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
    * and a deployment without one still serves models. The card simply has
    * nothing to list.
    */
-  const refreshCatalog = useCallback(async (): Promise<void> => {
+  const loadCatalog = useCallback(async (): Promise<void> => {
     try {
       const response = await fetch(COMATE_CATALOG_PATH, {
         headers: { accept: 'application/json' },
@@ -132,7 +176,72 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     }
   }, [])
 
-  useEffect(() => { void refreshCatalog() }, [refreshCatalog])
+  useEffect(() => { void loadCatalog() }, [loadCatalog])
+
+  /**
+   * Ask the host to re-read the local Comate config, then take its snapshot.
+   *
+   * The button exists because the host discovers models at startup and when
+   * `configFile` changes: a model the user just signed into in the desktop
+   * client would otherwise need a DSH restart to appear.
+   */
+  const onRefresh = async (): Promise<void> => {
+    if (refreshing) return
+    setRefreshing(true)
+    setRefreshNote(undefined)
+    try {
+      const answer = await refreshComateCatalog()
+      if (!mounted.current) return
+      setCatalog([...answer.models])
+      setCatalogFailed(false)
+      setRefreshNote({
+        tone: answer.signedIn ? 'ok' : 'info',
+        text: answer.signedIn
+          ? t('row.refreshed', { count: answer.models.length })
+          : t('row.refreshSignedOut'),
+      })
+    } catch (cause: unknown) {
+      if (mounted.current) {
+        setRefreshNote({
+          tone: 'error',
+          text: t('row.refreshFailed', { message: cause instanceof Error ? cause.message : String(cause) }),
+        })
+      }
+    } finally {
+      if (mounted.current) setRefreshing(false)
+    }
+  }
+
+  /**
+   * Send one minimal request through the host, using the CURRENT DRAFT values.
+   *
+   * Testing the draft is the point: the sid can be verified before it is saved,
+   * so a wrong paste never reaches the settings document. The host applies the
+   * draft to that single request and persists nothing.
+   */
+  const onTest = async (): Promise<void> => {
+    if (testing) return
+    setTesting(true)
+    setTestNote(undefined)
+    try {
+      const outcome = await testComateConnection({ wpsSid: trimmedSid, cookieOnly: draftCookieOnly })
+      if (!mounted.current) return
+      setTestNote(describeOutcome(outcome, t))
+    } catch (cause: unknown) {
+      if (mounted.current) {
+        setTestNote({
+          tone: 'error',
+          text: t('row.testFail', {
+            status: '-',
+            kind: 'route',
+            message: cause instanceof Error ? cause.message : String(cause),
+          }),
+        })
+      }
+    } finally {
+      if (mounted.current) setTesting(false)
+    }
+  }
 
   // A committed `configFile` change makes the host re-read the Comate config, so
   // the directory can change with it. The first run is skipped: the mount effect
@@ -141,8 +250,8 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   useEffect(() => {
     if (prevConfigFile.current === savedConfigFile) return
     prevConfigFile.current = savedConfigFile
-    void refreshCatalog()
-  }, [savedConfigFile, refreshCatalog])
+    void loadCatalog()
+  }, [savedConfigFile, loadCatalog])
 
   // External changes (another surface, first load) re-seed an untouched draft.
   const prevSavedSid = useRef(savedSid)
@@ -311,8 +420,19 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                     >
                       {t('row.selectNone')}
                     </button>
+                    {/* Reading the host's directory is not a settings write, so
+                        this stays available even when the section is locked. */}
+                    <button
+                      type="button"
+                      className="dsm-btn dsm-btn-outline"
+                      disabled={refreshing}
+                      onClick={() => { void onRefresh() }}
+                    >
+                      {refreshing ? t('row.refreshing') : t('row.refresh')}
+                    </button>
                   </div>
                 </div>
+                {refreshNote === undefined ? null : <Note note={refreshNote} />}
                 {catalog.length === 0
                   ? <p className="dsm-comate-hint">
                       {t(catalogFailed ? 'row.modelsUnavailable' : 'row.modelsEmpty')}
@@ -349,6 +469,17 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
               <div className="dsm-comate-actions">
                 {savedFlash ? <p className="dsm-comate-saved">{t('row.saved')}</p> : null}
                 {error === undefined ? null : <p className="dsm-comate-error">{t('row.saveError', { message: error })}</p>}
+                {/* Testing uses the DRAFT sid, so it works before anything is
+                    saved — and it is a read-only probe, not a settings write,
+                    which is why it ignores `writable`. */}
+                <button
+                  type="button"
+                  className="dsm-btn dsm-btn-outline"
+                  disabled={testing}
+                  onClick={() => { void onTest() }}
+                >
+                  {testing ? t('row.testing') : t('row.test')}
+                </button>
                 <button
                   type="button"
                   className="dsm-btn dsm-btn-outline"
@@ -366,6 +497,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                   {saving ? t('row.saving') : t('row.save')}
                 </button>
               </div>
+              {testNote === undefined ? null : <Note note={testNote} />}
             </div>
           : null}
       </div>

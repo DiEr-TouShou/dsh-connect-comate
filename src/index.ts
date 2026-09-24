@@ -28,6 +28,7 @@ import { COMATE_PROVIDER, comateModelInput, createComateAdapter } from './adapte
 import type { ComateModel } from './auth.ts'
 import { ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
+import { runComateCheck, type ComateCheckOutcome } from './check.ts'
 import { createComateShim } from './shim.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import {
@@ -35,7 +36,7 @@ import {
   type ComatePersistedModel,
 } from './bridge.ts'
 import { bindComateSettings } from './settings-surface.ts'
-import { registerComateStatusRoute } from './web-status.ts'
+import { registerComateStatusRoute, type ComateCheckInput } from './web-status.ts'
 
 export { COMATE_PROVIDER, createComateAdapter, comateModelInput, type ComateAdapter } from './adapter.ts'
 export { createComateShim, type ComateShim } from './shim.ts'
@@ -43,18 +44,31 @@ export { ComateCatalog, selectComateModels } from './catalog.ts'
 export {
   asVolatile,
   COMATE_CATALOG_PATH,
+  COMATE_CHECK_PATH,
   COMATE_CLIENT_NAME,
   COMATE_ENTRY_ID,
+  COMATE_REFRESH_PATH,
   COMATE_SETTINGS_NS,
   unwrapVolatile,
   unwrapVolatileDeep,
+  type ComateCatalogAnswer,
+  type ComateCheckOutcome,
+  type ComateCheckReason,
   type ComatePersistedModel,
   type ComateSettingsValue,
 } from './bridge.ts'
 export {
+  COMATE_CHECK_MAX_TOKENS,
+  comateCheckBody,
+  runComateCheck,
+  safeMessage,
+  type ComateCheckOptions,
+} from './check.ts'
+export {
   registerComateStatusRoute,
-  type ComateCatalogAnswer,
+  type ComateActionDeps,
   type ComateCatalogDeps,
+  type ComateCheckInput,
 } from './web-status.ts'
 export {
   bindComateSettings,
@@ -244,10 +258,45 @@ export function apply(ctx: Context, config: Config): void {
     void shim.close()
   })
 
+  /**
+   * The model the card's connection probe should use.
+   *
+   * The first ENABLED model, so the probe exercises a route the user actually
+   * intends to use. An empty enabled set means "every discovered model", so this
+   * degrades to the directory's first entry exactly when nothing is filtered.
+   */
+  const enabledFirstModel = (): string | undefined =>
+    selectComateModels(discovered, new Set(current().enabledModelIds ?? []))[0]?.id
+
+  /**
+   * Probe the connection with the card's (possibly unsaved) draft inputs.
+   *
+   * The draft never touches the store: `store.current(override)` applies it to
+   * this one read, so pressing 「测试连接」 cannot change what the plugin uses, and
+   * two concurrent probes cannot contaminate each other.
+   *
+   * Never throws — a failed probe is an answer the card renders.
+   */
+  const checkConnection = async (input: ComateCheckInput): Promise<ComateCheckOutcome> => {
+    const credential = await store.current({
+      ...input.wpsSid === undefined ? {} : { wpsSid: input.wpsSid },
+      ...input.cookieOnly === undefined ? {} : { cookieOnly: input.cookieOnly },
+    })
+    if (credential === undefined) return { ok: false, reason: 'no-credential' }
+    const model = input.model ?? enabledFirstModel() ?? credential.models[0]?.id
+    if (model === undefined) return { ok: false, reason: 'no-model' }
+    return runComateCheck({ credential, client, model })
+  }
+
   registerComateStatusRoute(ctx, {
     models: () => persistedCatalog,
     signedIn: () => signedIn,
     providerRegistered: () => providerRegistered,
+  }, {
+    // The same re-read the startup path uses, so a refresh can never diverge
+    // from what a restart would have discovered.
+    refresh: rediscover,
+    check: checkConnection,
   })
 
   void shim.ready

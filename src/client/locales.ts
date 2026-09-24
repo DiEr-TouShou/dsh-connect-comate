@@ -30,6 +30,17 @@ export const en = {
   'row.modelMultimodal': 'Image',
   'row.modelsEmpty': 'No model directory yet. Sign the WPS Comate desktop client in and restart DSH.',
   'row.modelsUnavailable': 'The model directory is unavailable: this deployment serves no host web route. Model serving is unaffected — reopen DSH with the web UI, or run `dsh plugin exec dsh-connect-comate status`.',
+  'row.refresh': 'Refresh models',
+  'row.refreshing': 'Refreshing…',
+  'row.refreshed': 'Re-read the local Comate config: {count} model(s).',
+  'row.refreshSignedOut': 'Re-read the local Comate config, but found no signed-in Comate credential.',
+  'row.refreshFailed': 'Refresh failed: {message}',
+  'row.test': 'Test connection',
+  'row.testing': 'Testing…',
+  'row.testOk': 'Connected. Probe model: {model}',
+  'row.testFail': 'Failed: HTTP {status} [{kind}] {message}',
+  'row.testNoCredential': '没有可测的凭据：请在上方填入 wps_sid，或先登录 WPS Comate 桌面端。',
+  'row.testNoModel': 'No model available to probe: the discovered directory is empty.',
 } as const
 
 export const zh = {
@@ -57,6 +68,17 @@ export const zh = {
   'row.modelMultimodal': '图片',
   'row.modelsEmpty': '还没有模型目录：请先登录 WPS Comate 桌面端并重启 DSH。',
   'row.modelsUnavailable': '取不到模型目录：当前部署没有宿主 Web 路由。模型服务不受影响——请在带 Web UI 的 DSH 里重新打开，或运行 `dsh plugin exec dsh-connect-comate status` 查看。',
+  'row.refresh': '刷新模型列表',
+  'row.refreshing': '刷新中…',
+  'row.refreshed': '已重新读取本机 Comate 配置：{count} 个模型。',
+  'row.refreshSignedOut': '已重新读取本机 Comate 配置，但没有找到已登录的 Comate 凭据。',
+  'row.refreshFailed': '刷新失败：{message}',
+  'row.test': '测试连接',
+  'row.testing': '测试中…',
+  'row.testOk': '连接成功。测试所用模型：{model}',
+  'row.testFail': '失败：HTTP {status} [{kind}] {message}',
+  'row.testNoCredential': '没有可测的凭据：请在上方填入 wps_sid，或先登录 WPS Comate 桌面端。',
+  'row.testNoModel': '没有可用于测试的模型：发现的模型目录是空的。',
 } as const
 
 export type ComateSettingsKey = keyof typeof en

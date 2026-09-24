@@ -102,6 +102,11 @@ function nonEmptyEnv(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
+/** Trim a candidate value, treating blank as absent. */
+function nonEmptyString(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === '' ? undefined : value.trim()
+}
+
 /** The Comate home directory (env override or `~/.wpscomate`). */
 export function defaultComateHome(
   env: NodeJS.ProcessEnv = process.env,
@@ -209,6 +214,20 @@ export function parseComateConfig(text: string, filePath: string): ComateCredent
   }
 }
 
+/**
+ * One-shot credential inputs for a single read.
+ *
+ * Used by the card's 「测试连接」 so an unsaved draft sid can be probed before it
+ * is committed. Nothing here is ever stored: the fields live on the call, not on
+ * the store, so a test cannot change what the plugin actually uses.
+ */
+export interface ComateCredentialOverride {
+  /** Manual sid to use for this read; absent or blank keeps the saved value. */
+  wpsSid?: string
+  /** Cookie-only auth for this read; absent keeps the saved value. */
+  cookieOnly?: boolean
+}
+
 /** Constructor options; all fields optional. */
 export interface ComateStoreOptions {
   /** Explicit Comate config-file path, overriding env and platform defaults. */
@@ -290,17 +309,29 @@ export class ComateCredentialStore {
       : { credential }
   }
 
-  /** First candidate that yields a valid credential. */
-  async current(): Promise<ComateCredential | undefined> {
+  /**
+   * First candidate that yields a valid credential.
+   *
+   * @param override - one-shot credential inputs, applied to THIS call only and
+   * never stored. It exists so the card's 「测试连接」 can probe an unsaved draft
+   * sid before the user commits to saving it; writing the draft into the
+   * instance fields instead would let two concurrent requests contaminate each
+   * other, and would make a mere test silently change what the plugin uses.
+   * An absent or blank field falls back to the saved value.
+   * @returns the credential, or undefined when no candidate resolves.
+   */
+  async current(override: ComateCredentialOverride = {}): Promise<ComateCredential | undefined> {
+    const draftSid = nonEmptyString(override.wpsSid)
+    const cookieOnly = override.cookieOnly ?? this.cookieOnlyOverride
     for (const path of this.candidates()) {
       const { credential } = await this.readCandidate(path)
       if (credential !== undefined) {
-        const sid = this.sidOverride()
-        if (sid !== undefined || this.cookieOnlyOverride) {
+        const sid = draftSid ?? this.sidOverride()
+        if (sid !== undefined || cookieOnly) {
           return {
             ...credential,
             ...sid !== undefined ? { cookie: `wps_sid=${sid}` } : {},
-            authHeader: credential.authHeader && !this.cookieOnlyOverride,
+            authHeader: credential.authHeader && !cookieOnly,
           }
         }
         return credential
