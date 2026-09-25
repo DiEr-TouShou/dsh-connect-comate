@@ -15,12 +15,15 @@
  * 退出码 0 = 5/5 通过。
  */
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { deflateSync } from 'node:zlib'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+// `homedir()` 而不是 `USERPROFILE`：后者只在 Windows 上有，别的平台上会拼出一个
+// 相对 cwd 的假路径，报错也看不出是认路认错了。
 const pluginDir = process.env['COMATE_PLUGIN_DIR']
-  ?? join(process.env['USERPROFILE'] ?? '', '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-connect-comate')
+  ?? join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-connect-comate')
 const entry = join(pluginDir, 'lib', 'index.js')
 if (!existsSync(entry)) {
   console.error(`找不到安装产物：${entry}\n用 COMATE_PLUGIN_DIR 指定插件安装目录。`)

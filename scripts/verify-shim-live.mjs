@@ -15,17 +15,17 @@
  *
  * 跑法（需要登录态，默认不在 CI 里跑）：
  *   node scripts/verify-shim-live.mjs
- *   COMATE_PKG_DIR=C:/Users/ASUS/.dsh/profiles/desktop/node_modules/dsh-connect-comate \
- *     node scripts/verify-shim-live.mjs
+ *   COMATE_PKG_DIR="<插件安装目录>" node scripts/verify-shim-live.mjs
+ *   WPS_COMATE_SID=<sid> node scripts/verify-shim-live.mjs
  *
  * 判定：图片必须**答出左红右蓝**（只断言「有正文」会放过「我读不到这张图」），且
  * shim 的图片计数必须是 `externalized=1 upload_failed=0`——出站是 URL 而不是 inline
  * base64，才是这次修复真正要钉住的东西。
  */
 import { deflateSync } from 'node:zlib'
-import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
+import { readWpsSid } from './live-profile.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_DIR = resolve(process.env.COMATE_PKG_DIR ?? join(HERE, '..'))
@@ -83,16 +83,6 @@ function halfAndHalfPng(size) {
 
 const IMAGE_DATA_URL = `data:image/png;base64,${halfAndHalfPng(96).toString('base64')}`
 
-/** 手填的 wps_sid：桌面端 config 里是占位字面量，真会话只在 profile 的 patch 里。 */
-function readSid() {
-  const fromEnv = process.env.WPS_COMATE_SID
-  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
-  const patch = readFileSync('C:/Users/ASUS/.dsh/profiles/desktop/cordis.patch.yml', 'utf8')
-  const match = /wpsSid:\s*(\S+)/.exec(patch)
-  if (match === null) throw new Error('no wpsSid in cordis.patch.yml and no WPS_COMATE_SID')
-  return match[1].replace(/^['"]|['"]$/g, '')
-}
-
 /** 真机上失败的那次请求形状：图片来自 read_image 工具结果，放在 tool 消息里。 */
 function toolImageBody(modelId) {
   return JSON.stringify({
@@ -149,7 +139,7 @@ console.log(`package   : ${PKG_DIR}`)
 console.log(`version   : ${pkg.COMATE_CONNECT_VERSION}`)
 
 const store = new ComateCredentialStore()
-store.setWpsSid(readSid())
+store.setWpsSid(readWpsSid())
 const credential = await store.current()
 if (credential === undefined) {
   console.error('FAIL 拿不到凭据（config.json 缺失或不可读）')

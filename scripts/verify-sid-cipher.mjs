@@ -15,12 +15,13 @@
  */
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+// 同 `verify-installed.mjs`：`USERPROFILE` 只有 Windows 有，换平台会拼出假路径。
 const pluginDir = process.env['COMATE_PLUGIN_DIR']
-  ?? join(process.env['USERPROFILE'] ?? '', '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-connect-comate')
+  ?? join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-connect-comate')
 const entry = join(pluginDir, 'lib', 'index.js')
 if (!existsSync(entry)) {
   console.error(`找不到安装产物：${entry}\n用 COMATE_PLUGIN_DIR 指定插件安装目录。`)

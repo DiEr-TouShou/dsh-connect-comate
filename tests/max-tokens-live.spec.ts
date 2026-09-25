@@ -2,7 +2,9 @@
  * 真机验收（默认跳过）：输出上限**真的到了线上**，而且上游**真的执行了**它。
  *
  * 默认套件必须无网，所以用 `WPS_COMATE_LIVE=1` 显式开关；凭据取 `WPS_COMATE_SID`，
- * 或退回桌面端 `cordis.patch.yml` 里手填的 sid。
+ * 或退回 DSH profile 的 `cordis.patch.yml` 里手填的 sid——**路径解析在
+ * `scripts/live-profile.mjs`**（本文件与另两个真机脚本共用，那里没有任何用户名，
+ * 换台机器不用改源码）。
  *
  * 跑法：
  *   WPS_COMATE_LIVE=1 npx vitest run tests/max-tokens-live.spec.ts
@@ -27,8 +29,8 @@
  * 走的是真的 `PiAiAdapter` → 真 shim（真 HTTP 回环）→ 真网关，只有上游客户端被
  * 包一层以便读取转出去的 body——即被测链路完整、观测点唯一。
  */
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { readWpsSid } from '../scripts/live-profile.mjs'
 import { COMATE_PROVIDER, createComateAdapter } from '../src/adapter.ts'
 import { ComateCredentialStore, type ComateCredential } from '../src/auth.ts'
 import { COMATE_DEFAULT_MAX_TOKENS } from '../src/bridge.ts'
@@ -36,16 +38,6 @@ import { ComateCatalog } from '../src/catalog.ts'
 import { COMATE_UNLIMITED_MAX_TOKENS } from '../src/max-tokens.ts'
 import { createComateShim } from '../src/shim.ts'
 import { ComateUpstreamClient } from '../src/upstream.ts'
-
-/** 手填的 wps_sid：桌面端 config 里是占位字面量，真会话只在 profile 的 patch 里。 */
-function readSid(): string {
-  const fromEnv = process.env['WPS_COMATE_SID']
-  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
-  const patch = readFileSync('C:/Users/ASUS/.dsh/profiles/desktop/cordis.patch.yml', 'utf8')
-  const match = /wpsSid:\s*(\S+)/.exec(patch)
-  if (match === null) throw new Error('no wpsSid in cordis.patch.yml and no WPS_COMATE_SID')
-  return match[1]!.replace(/^['"]|['"]$/g, '')
-}
 
 /** 题面故意长到远超任何小上限，让「被截断」成为唯一可能。 */
 const PROMPT = 'Count from 1 to 200, one number per line, no commentary.'
@@ -62,7 +54,7 @@ interface Attempt {
 
 /** 凭据 + 目录：两条用例共用的两个真机输入。 */
 async function liveInputs(): Promise<{ store: ComateCredentialStore; catalog: ComateCatalog; modelIds: string[] }> {
-  const store = new ComateCredentialStore({ wpsSid: readSid() })
+  const store = new ComateCredentialStore({ wpsSid: readWpsSid() })
   const credential = await store.current()
   expect(credential, '拿不到凭据（config.json 缺失或不可读）').toBeDefined()
   const catalog = new ComateCatalog()

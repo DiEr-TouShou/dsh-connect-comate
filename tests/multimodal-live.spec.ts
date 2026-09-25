@@ -4,7 +4,9 @@
  * 出问题的那次请求形状——图片来自 `read_image` 工具结果、放在 tool 消息里。
  *
  * 默认套件必须无网（`vitest run` 不该依赖登录态），所以这里用 `WPS_COMATE_LIVE=1`
- * 显式开关；凭据取 `WPS_COMATE_SID`，或退回桌面端 `cordis.patch.yml` 里手填的 sid。
+ * 显式开关；凭据取 `WPS_COMATE_SID`，或退回 DSH profile 的 `cordis.patch.yml` 里
+ * 手填的 sid——路径解析在 `scripts/live-profile.mjs`（与另两个真机脚本共用，
+ * 那里没有任何用户名，换台机器不用改源码）。
  *
  * 跑法：
  *   WPS_COMATE_LIVE=1 npx vitest run tests/multimodal-live.spec.ts
@@ -22,9 +24,9 @@
  * 其中 `mimo-v2.5` 是修复前唯一失败的模型：发 base64 时上游回
  * `unsupported message.content type=image`（同一张图换成 URL 即正常）。
  */
-import { readFileSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
+import { readWpsSid } from '../scripts/live-profile.mjs'
 import { ComateCredentialStore } from '../src/auth.ts'
 import { ComatePresignUploader } from '../src/assets.ts'
 import { emptyImageStats, emptyUploadStats, uploadChatImages } from '../src/multimodal.ts'
@@ -111,15 +113,6 @@ function toolImageBody(modelId: string, imageUrl: string): string {
   })
 }
 
-function readSid(): string {
-  const fromEnv = process.env['WPS_COMATE_SID']
-  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
-  const patch = readFileSync('C:/Users/ASUS/.dsh/profiles/desktop/cordis.patch.yml', 'utf8')
-  const match = /wpsSid:\s*(\S+)/.exec(patch)
-  if (match === null) throw new Error('no wpsSid in cordis.patch.yml and no WPS_COMATE_SID')
-  return match[1]!.replace(/^['"]|['"]$/g, '')
-}
-
 /** 读 SSE，拼出正文与错误。 */
 async function collect(response: Response): Promise<{ text: string; error: string }> {
   const raw = await response.text()
@@ -144,7 +137,7 @@ async function collect(response: Response): Promise<{ text: string; error: strin
 
 describe.skipIf(process.env['WPS_COMATE_LIVE'] !== '1')('live: 5 模型图片矩阵', () => {
   it('五个多模态模型都真的看到了图（左红右蓝），且出站是 URL', { timeout: 600_000 }, async () => {
-    const store = new ComateCredentialStore({ wpsSid: readSid() })
+    const store = new ComateCredentialStore({ wpsSid: readWpsSid() })
     const credential = await store.current()
     expect(credential).toBeDefined()
     const client = new ComateUpstreamClient()
