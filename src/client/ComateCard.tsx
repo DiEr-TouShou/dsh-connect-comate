@@ -145,6 +145,11 @@ function isPersistedModel(value: unknown): value is ComatePersistedModel {
     && typeof model.multimodal === 'boolean'
 }
 
+/** Set equality over model ids: a draft only re-seeds while it still matches. */
+function sameIdSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every(id => right.has(id))
+}
+
 /** Render the Comate sign-in configuration as one card (or page body). */
 export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   if (t === undefined) throw new Error('Comate plugin card requires its translation function')
@@ -342,41 +347,49 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // External changes (another surface, first load) re-seed an untouched draft.
   // The sid draft is deliberately excluded: it never mirrors the stored value,
   // so an external change has nothing to re-seed into it.
+  //
+  // Each effect copies the previous value into a local BEFORE writing its ref,
+  // and only that local is read inside the `setDraft*` updater. The updater is
+  // lazy — it runs during a later render — so reading `ref.current` inside it
+  // would see the value the effect itself just wrote: the "has the user touched
+  // this?" test would always answer "yes" and the draft would never re-seed.
+  // That is precisely how the model list ended up with every box unchecked: the
+  // saved selection arrives (or the directory does) after the card mounts, the
+  // draft is still the empty seed, and the re-seed never fired.
   const prevSavedCookieOnly = useRef(savedCookieOnly)
-  const prevSavedEnabledKey = useRef('')
   const prevSavedMaxTokens = useRef(savedMaxTokens)
+  const prevSavedEnabled = useRef<ReadonlySet<string> | undefined>(undefined)
   useEffect(() => {
-    if (prevSavedCookieOnly.current !== savedCookieOnly) {
-      setDraftCookieOnly(current => (current === prevSavedCookieOnly.current ? savedCookieOnly : current))
-      prevSavedCookieOnly.current = savedCookieOnly
-    }
+    const previous = prevSavedCookieOnly.current
+    if (previous === savedCookieOnly) return
+    prevSavedCookieOnly.current = savedCookieOnly
+    setDraftCookieOnly(current => (current === previous ? savedCookieOnly : current))
   }, [savedCookieOnly])
   // Same treatment as the cookie toggle: the cap is not a secret, so a draft the
   // user has not touched follows a value changed from another surface.
   useEffect(() => {
-    if (prevSavedMaxTokens.current !== savedMaxTokens) {
-      setDraftMaxTokens(current => (
-        current === String(prevSavedMaxTokens.current) ? String(savedMaxTokens) : current
-      ))
-      prevSavedMaxTokens.current = savedMaxTokens
-    }
+    const previous = prevSavedMaxTokens.current
+    if (previous === savedMaxTokens) return
+    prevSavedMaxTokens.current = savedMaxTokens
+    setDraftMaxTokens(current => (current === String(previous) ? String(savedMaxTokens) : current))
   }, [savedMaxTokens])
-  // The directory arrives asynchronously, so this key changes from the empty set
-  // to "everything discovered" once the fetch lands — which re-seeds a draft the
-  // user has not touched yet.
-  const savedEnabledKey = [...savedEnabledIds].join('|')
+  // The directory arrives asynchronously, so the saved set moves from the empty
+  // set to "everything discovered" once the fetch lands — which re-seeds a draft
+  // the user has not touched yet. `undefined` means "nothing observed yet": the
+  // draft was seeded from that very value by `useState`, so there is nothing to
+  // re-seed on the first run.
+  //
+  // The comparison is over membership, not over a joined key: a draft holding
+  // the same ids in another order is still untouched, and a joined string would
+  // call it touched and freeze it forever.
   useEffect(() => {
-    if (prevSavedEnabledKey.current !== savedEnabledKey) {
-      setDraftEnabled(current => (
-        [...current].join('|') === prevSavedEnabledKey.current ? new Set(savedEnabledIds) : current
-      ))
-      prevSavedEnabledKey.current = savedEnabledKey
-    }
-  }, [savedEnabledKey, savedEnabledIds])
+    const previous = prevSavedEnabled.current
+    prevSavedEnabled.current = savedEnabledIds
+    if (previous === undefined || sameIdSet(previous, savedEnabledIds)) return
+    setDraftEnabled(current => (sameIdSet(current, previous) ? new Set(savedEnabledIds) : current))
+  }, [savedEnabledIds])
 
   const writable = comateSettingsWritable(settingsScope)
-  const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
-    a.size === b.size && [...a].every(id => b.has(id))
   const trimmedSid = (draftSid ?? '').trim()
   // The sid participates in "dirty" only on an explicit intent — a typed
   // replacement, or a staged clear. An emptied field keeps the stored value:
@@ -393,7 +406,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const dirty = sidDirty
     || draftCookieOnly !== savedCookieOnly
     || maxTokensDirty
-    || !sameSet(draftEnabled, savedEnabledIds)
+    || !sameIdSet(draftEnabled, savedEnabledIds)
 
   /**
    * Upgrade a plaintext stored sid to encrypted storage.

@@ -160,6 +160,14 @@ COMATE_PKG_DIR=<插件安装目录> pnpm run verify:shim
 # （明文可读 / 往返逐字节一致 / 设置文档里没有明文 / 四种「解不开」的成因各自可分辨 /
 #   doctor 只报路径不报密钥 / 升级路径的两条拒绝条件）。不碰真实凭据与真实密钥文件
 pnpm run verify:sid-cipher
+
+# 卡片「启用的模型」勾选状态：在 jsdom 里跑**真实构建产物** lib/client.js，按用户的
+# 操作序列（打开 / 取消勾选 / 保存 / 退出 / 再进入）断言 DOM 上的勾选状态与汇总行。
+# 钉住的是「设置快照与模型目录两个异步源谁先到，草稿该怎么重新播种」——这一层类型
+# 检查和纯函数单测都看不见（0.4.0-rc.2 就是这么漏的：一进来全不勾）。
+# 需要 devDependencies 里的 jsdom + react-dom；若本仓库的 node_modules 承载不了它们
+# （它可能是指向已安装 profile 的链接），用 DSH_COMATE_CARD_DEPS 指向别的目录。
+pnpm run build && pnpm run verify:card
 ```
 
 `verify:shim` 默认只打 `mimo-v2.5`（修复前唯一失败的模型），要全矩阵就加

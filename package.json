@@ -2,7 +2,7 @@
   "name": "dsh-connect-comate",
   "displayName": "DSH Connect WPS Comate",
   "description": "Connect the locally signed-in WPS Comate account to DeepSeek Harness as a model provider, via a secure loopback shim (reverse-proxy style). 通过安全回环 shim（反向代理），把本机已登录的 WPS Comate 账号接入 DeepSeek Harness 作为模型来源。",
-  "version": "0.4.0-rc.2",
+  "version": "0.4.0-rc.3",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
@@ -47,6 +47,7 @@
     "test": "vitest run",
     "verify:installed": "node scripts/verify-installed.mjs",
     "verify:sid-cipher": "node scripts/verify-sid-cipher.mjs",
+    "verify:card": "node scripts/verify-card-selection.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
     "verify:shim": "node scripts/verify-shim-live.mjs"
@@ -112,7 +113,9 @@
     "@earendil-works/pi-ai": ">=0.85.0 <0.86.0",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.31",
+    "jsdom": "^30.1.1",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsdown": "^0.22.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.8"
