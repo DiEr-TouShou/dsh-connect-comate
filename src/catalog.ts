@@ -7,7 +7,7 @@
  *     沿用自该项目。
  *
  * 与 WorkBuddy 不同，Comate 的模型目录就在本地 config 里（无远端目录
- * 接口需要轮询），因此 v0.1 不做静态 fallback：config 缺失时目录为空，
+ * 接口需要轮询），因此不做静态 fallback：config 缺失时目录为空，
  * provider 注册但不暴露模型，doctor 会给出明确提示。
  *
  * @module dsh-connect-comate/catalog

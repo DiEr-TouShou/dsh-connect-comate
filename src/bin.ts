@@ -7,7 +7,7 @@
  *     `safeMessage` 脱敏、schemaVersion 字段，均由该项目
  *     （转引自 corrinehu/dsh-workbuddy-connect，MIT）设计。
  * 改动：诊断对象从「账号目录扫描」改为「Comate 本地 config 候选文件」；
- *   v0.1 无插件自有凭据副本，logout 仅报告。
+ *   无插件自有凭据副本，logout 仅报告。
  *
  * @module dsh-connect-comate/bin
  */

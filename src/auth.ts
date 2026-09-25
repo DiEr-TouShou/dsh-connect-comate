@@ -235,7 +235,7 @@ export interface ComateStoreOptions {
   /**
    * Manual WPS login cookie value (`wps_sid` from www.wps.cn). The desktop
    * config only stores placeholders (the real cookie is delivered per task
-   * by the Comate UI), so v0.1 lets you paste the sid here as `wps_sid=<v>`.
+   * by the Comate UI), so the sid can be pasted here as `wps_sid=<v>`.
    */
   wpsSid?: string
   /**
@@ -391,7 +391,7 @@ export class ComateCredentialStore {
       hints.push('The desktop config stores placeholder apiKey/cookie only (the real credential is delivered per task by the Comate UI), so llmproxy answers 401. Fill `wpsSid` in the DSH plugin settings (wps_sid from www.wps.cn cookies) or set WPS_COMATE_SID.')
     }
     if (userAuthPresent === false) {
-      hints.push('No user_auth.json found; v0.1 relies on config.json as-is (token refresh is a future step).')
+      hints.push('No user_auth.json found; the plugin relies on config.json as-is (token refresh is a future step).')
     }
     return {
       schemaVersion: 1,
@@ -420,7 +420,7 @@ export class ComateCredentialStore {
   }
 
   /**
-   * v0.1 keeps no plugin-owned credential copy, so there is nothing to
+   * The plugin keeps no credential copy of its own, so there is nothing to
    * remove; the Comate desktop files are never touched.
    */
   async logout(): Promise<void> {}

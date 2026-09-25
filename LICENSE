@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project is an independent implementation that borrows design ideas from:
-
-- dingminhua/dsh-connect-workbuddy (MIT, Copyright (c) 2026 LaoDing)
-  — DeepSeek Harness bundle plugin structure, loopback-shim security model,
-    pi-ai provider assembly, and CLI diagnostics.
-
-See README.md for the full attribution note.

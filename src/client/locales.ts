@@ -41,7 +41,7 @@ export const en = {
   'row.testing': 'Testing…',
   'row.testOk': 'Connected. Probe model: {model}',
   'row.testFail': 'Failed: HTTP {status} [{kind}] {message}',
-  'row.testNoCredential': '没有可测的凭据：请在上方填入 wps_sid，或先登录 WPS Comate 桌面端。',
+  'row.testNoCredential': 'No credential to test: paste a wps_sid above, or sign in to the WPS Comate desktop client first.',
   'row.testNoModel': 'No model available to probe: the discovered directory is empty.',
 } as const
 
