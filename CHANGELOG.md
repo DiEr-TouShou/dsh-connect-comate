@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 (2026-09-25)
+
+> 从这一版起，凭据不再明文躺在 DSH profile 里。0.4.0 = 0.3.3 之后的**全部**改动：
+> `0.3.4-rc.1`（输出 token 上限可配置）+ `0.4.0-rc.1` / `rc.2` / `rc.3`（凭据密文，以及两条真机修复）。
+> 已打 tag `v0.4.0` 并推 origin；安装：`github:DiEr-TouShou/dsh-connect-comate#v0.4.0`。未上 npm。
+> 每条改动的完整推理与验收记录在下面四条 rc 条目里，这里只列入口。
+
+### Features
+
+- **`wps_sid` 密文落盘（`enc:v1:`）** —— 信封 = `enc:v1:` + base64url(IV ‖ tag ‖ 密文)，AES-256-GCM；钥匙是 `~/.wpscomate/dsh-connect-comate/secret.key` 里的 32 字节随机数，经 HKDF-SHA256 用**本机指纹**（平台+架构+主机名+用户名）派生。所以「同步了 profile、没同步密钥」的结果是**读不出来并明确报错**，而不是静默用一个别人的凭据。0.4 之前的明文值继续可用，卡片打开时自动就地升级（**明文一次都不经过浏览器**）。细节与状态机（`unset` / `plaintext` / `sealed` / `unreadable`）见 `0.4.0-rc.1`。
+- **卡片里的 `wps_sid` 变成密码框**：只显示圆点，复制/剪切/拖拽/右键四个事件全拦；没有「显示明文」开关。状态行能说出「密文在，但本机解不开」——这个判断浏览器做不了（密钥丢了之后的密文和健康的密文逐字节一样），由宿主的目录路由带出来。
+- **输出 token 上限变成可配置的**（`0.3.4-rc.1`）：`WPS_COMATE_MAX_TOKENS` > 卡片设置 > 默认 32000，`0` 是一条独立语义（不发 `max_tokens` 字段，交给上游）。改完保存即生效。
+- **CLI 新增 `seal` 子命令**；`doctor` 新增 `wpsSidStorage` / `wpsSidProblem` / `wpsSidKeyFile`（都是**路径**，永远不是密钥本身），并按状态给不同的修复 hint。
+
+### Bug Fixes
+
+- **坏掉的信封不再被当成明文 sid 用**（`0.4.0-rc.2`）：按**前缀**分流，`enc:v1:` 开头但载荷被改坏的值如实报 `malformed`——此前它会落进「明文」分支被当凭据发出去，用户看到的是一句莫名其妙的 401。同时拒绝把坏密文「升级」再加密一次（那等于把仅存的一份密文换成对垃圾的加密，把「可恢复」变成「永久损坏」）。
+- **「启用的模型」不再一进来就全不勾**（`0.4.0-rc.3`）：重新播种草稿的 effect 把「用户碰过没有」的判断读进了 `setDraft*` 的**惰性 updater**，而它读的 ref 已被同一次 effect 改写——判断永远答「碰过」，草稿永远不重新播种。目录比卡片挂载晚到（冷启动即如此）或存的是 `[]`（「全部模型」哨兵）时，勾选一排全空，退出设置再进来还是空。同一处也压着上限输入框与 cookie 开关。
+
+### Tests
+
+- 测试 **158 → 257 例**（17 个文件，另 2 例真机验收默认跳过）。四条 rc 各自的新增见下；主要几块：`catalog-route.spec.ts`（35）、`settings-write.spec.ts`（31）、`multimodal.spec.ts`（28）、`max-tokens.spec.ts`（23）、`auth-rest.spec.ts`（16）、`auth.spec.ts`（16）、`secret.spec.ts`（15）。
+- 验收脚本四条：`verify:sid-cipher`（密文链路状态矩阵，不碰真实凭据）、`verify:card`（jsdom 里跑**真渲染产物**，钉卡片勾选状态机；在修复前的代码上 12/17 红）、`verify:installed`、`verify:shim`（真凭据、真上游、HTTP 全链路）。
+
+### Packaging
+
+- 版本 0.4.0（同日三条候选：rc.1 → rc.2 → rc.3）。
+- devDependencies 增加 `jsdom` + `react-dom`（只给 `verify:card` 用；运行时不需要）。
+
 ## 0.4.0-rc.3 (2026-09-25)
 
 ### Fixes
