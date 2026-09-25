@@ -34,7 +34,7 @@
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { isSealedComateSecret, type ComateSealAnswer } from './bridge.ts'
+import { COMATE_SEALED_PREFIX, isSealedComateSecret, type ComateSealAnswer } from './bridge.ts'
 import {
   COMATE_SECRET_DIRNAME,
   COMATE_SECRET_KEY_ENV,
@@ -468,7 +468,13 @@ export class ComateCredentialStore {
     // No envelope means a value written before 0.4 (or a user-supplied env one):
     // read it as-is rather than refusing it, so an upgrade never loses the
     // credential that is already working.
-    if (!isSealedComateSecret(raw)) return { sid: raw, storage: 'plaintext', keyFile }
+    // Routing on the PREFIX ALONE, not on the strict envelope check: a string that
+    // starts with `enc:v1:` but has a broken body can only ever be a damaged
+    // envelope (every pre-0.4 plaintext sid starts with `V02…`). Treating it as
+    // plaintext would send `wps_sid=enc:v1:…` upstream and turn "your settings
+    // value got mangled" into an unexplained 401; `openSecret` reports it as
+    // `malformed`, which is the truth.
+    if (!raw.startsWith(COMATE_SEALED_PREFIX)) return { sid: raw, storage: 'plaintext', keyFile }
     const opened = await openSecret(raw, { keyFile })
     return opened.ok
       ? { sid: opened.value, storage: 'sealed', keyFile }
@@ -501,6 +507,13 @@ export class ComateCredentialStore {
     const stored = this.storedRawSid()
     if (stored === undefined) throw new Error('comate: no stored wps_sid to seal')
     if (isSealedComateSecret(stored)) throw new Error('comate: the stored wps_sid is already sealed')
+    // A damaged envelope is refused rather than sealed as if it were plaintext:
+    // re-sealing it would replace whatever is left of the ciphertext with an
+    // encryption of the damage, destroying the only copy of a value the user may
+    // still be able to recover (a backup, another machine's key file).
+    if (stored.startsWith(COMATE_SEALED_PREFIX)) {
+      throw new Error('comate: the stored wps_sid is a damaged sealed value; paste the sid again instead of re-sealing it')
+    }
     return await this.seal(stored, env)
   }
 

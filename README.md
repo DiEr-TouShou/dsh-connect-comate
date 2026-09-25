@@ -155,6 +155,11 @@ WPS_COMATE_SID=<sid> pnpm run verify:installed
 # 整条 HTTP 链路：真起 shim、真凭据、真上游。上面两个直接调函数，
 # 验的是层内；这个验的是 DSH → pi-ai → shim(HTTP) → adapter → 上游 的接缝
 COMATE_PKG_DIR=<插件安装目录> pnpm run verify:shim
+
+# wps_sid 密文链路：直接 import 已构建的 lib/，用临时密钥文件跑完整状态矩阵
+# （明文可读 / 往返逐字节一致 / 设置文档里没有明文 / 四种「解不开」的成因各自可分辨 /
+#   doctor 只报路径不报密钥 / 升级路径的两条拒绝条件）。不碰真实凭据与真实密钥文件
+pnpm run verify:sid-cipher
 ```
 
 `verify:shim` 默认只打 `mimo-v2.5`（修复前唯一失败的模型），要全矩阵就加

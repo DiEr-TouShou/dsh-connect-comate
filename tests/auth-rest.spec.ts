@@ -7,7 +7,7 @@ import {
   ComateCredentialStore,
   defaultSecretKeyFile,
 } from '../src/auth.ts'
-import { isSealedComateSecret } from '../src/bridge.ts'
+import { COMATE_SEALED_PREFIX, isSealedComateSecret } from '../src/bridge.ts'
 import { COMATE_SECRET_DIRNAME, COMATE_SECRET_KEY_FILENAME } from '../src/secret.ts'
 
 /** The same shape `auth.spec.ts` uses: one official provider, cookie `wps_sid=abc`. */
@@ -147,6 +147,21 @@ describe('ComateCredentialStore wps_sid at rest', () => {
     expect(await store.resolveSid({})).toMatchObject({ sid: 'stored-plain-sid', storage: 'sealed' })
     // Sealing again is a no-op the caller must not mistake for progress.
     await expect(store.sealStored({})).rejects.toThrow(/already sealed/)
+  })
+
+  it('reports a broken envelope as malformed instead of using it as a plaintext sid', async () => {
+    // A pre-0.4 plaintext sid always looks like `V02…`, so a value that STARTS with
+    // the envelope prefix can only be a damaged envelope. Sending it upstream as if
+    // it were the credential turns "your settings value got mangled" into an
+    // unexplained 401; the honest answer is `malformed`.
+    const store = storeWith({ wpsSid: `${COMATE_SEALED_PREFIX}${'A'.repeat(40)}!!!` })
+    expect(await store.resolveSid({})).toMatchObject({ storage: 'unreadable', problem: 'malformed' })
+    expect((await store.resolveSid({})).sid).toBeUndefined()
+  })
+
+  it('refuses to re-seal a damaged envelope (that would destroy the only copy)', async () => {
+    const store = storeWith({ wpsSid: `${COMATE_SEALED_PREFIX}${'A'.repeat(40)}!!!` })
+    await expect(store.sealStored({})).rejects.toThrow(/damaged sealed value/)
   })
 
   it('refuses to seal an env-only sid into the settings document', async () => {
