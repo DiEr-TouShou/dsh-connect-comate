@@ -15,12 +15,16 @@
  * 用法：
  *   pnpm run build && pnpm run verify:card
  *
+ * 默认验本仓库的构建产物；`COMATE_PLUGIN_DIR` 可指到**安装产物**（与 `verify:sid-cipher`
+ * 同一约定）——「源码绿 ≠ 产物绿」，而卡片这条尤其要看产物：宿主下发的就是那个文件。
+ *
  * `jsdom` + `react-dom` 是 devDependencies，默认从本仓库的 `node_modules` 解析。若
  * 这棵树承载不了它们（仓库的 `node_modules` 是指向已安装 profile 的链接，普通
  * `pnpm install` 会重建那棵被链接的树），把 `DSH_COMATE_CARD_DEPS` 指向任何一个装好
  * 了它们的目录即可：
  *
- *   DSH_COMATE_CARD_DEPS=/path/to/scratch pnpm run verify:card
+ *   COMATE_PLUGIN_DIR=<插件安装目录> \
+ *     DSH_COMATE_CARD_DEPS=/path/to/scratch pnpm run verify:card
  *
  * 退出码 0 = 全部通过。
  */
@@ -28,8 +32,12 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
-const BUNDLE = new URL('../lib/client.js', import.meta.url)
+const pluginDir = process.env.COMATE_PLUGIN_DIR
+const BUNDLE = pluginDir === undefined || pluginDir === ''
+  ? new URL('../lib/client.js', import.meta.url)
+  : pathToFileURL(join(pluginDir, 'lib', 'client.js'))
 const require_ = createRequire(import.meta.url)
 
 /** 解析 jsdom/react-dom：先 `DSH_COMATE_CARD_DEPS`（若给了），再本仓库的树。 */

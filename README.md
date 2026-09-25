@@ -167,6 +167,7 @@ pnpm run verify:sid-cipher
 # 检查和纯函数单测都看不见（0.4.0-rc.2 就是这么漏的：一进来全不勾）。
 # 需要 devDependencies 里的 jsdom + react-dom；若本仓库的 node_modules 承载不了它们
 # （它可能是指向已安装 profile 的链接），用 DSH_COMATE_CARD_DEPS 指向别的目录。
+# COMATE_PLUGIN_DIR=<插件安装目录> 则改为验安装产物（同 verify:sid-cipher）
 pnpm run build && pnpm run verify:card
 ```
 
