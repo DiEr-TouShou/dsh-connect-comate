@@ -441,9 +441,9 @@ export function apply(ctx: Context, config: Config): void {
     signedIn: () => signedIn,
     providerRegistered: () => providerRegistered,
     // Reported host-side because the browser cannot tell a sealed value that
-    // opens from one whose key file is gone. Resolved live (a few ms of scrypt
-    // per catalog read) rather than cached: the card reads this right after a
-    // save, which is exactly when a cached answer would be stale.
+    // opens from one whose key file is gone. Resolved live (one key-file stat
+    // plus HKDF per catalog read) rather than cached: the card reads this right
+    // after a save, which is exactly when a cached answer would be stale.
     sidState: async () => {
       const resolved: ComateSidResolution = await store.resolveSid()
       return resolved.problem === undefined

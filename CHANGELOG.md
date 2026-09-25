@@ -22,7 +22,7 @@
 
 ### Features
 
-- **`wps_sid` 不再以明文落盘，改为密文保存（`enc:v1:`）。** 之前这个凭据是以明文躺在 DSH profile 的 `cordis.patch.yml` 里的——那个文件会被同步、备份、进仓库、贴进 issue。现在它是一串密文，解开的钥匙在**另一个目录树**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`，0600）加上**本机指纹**（平台 + 架构 + 主机名 + 用户名）经 scrypt 派生出 AES-256-GCM 的 key，密文里带随机 IV 与认证标签。所以「同步了 profile、没同步密钥」的结果是**读不出来并明确报错**，而不是静默用一个别人的凭据。
+- **`wps_sid` 不再以明文落盘，改为密文保存（`enc:v1:`）。** 之前这个凭据是以明文躺在 DSH profile 的 `cordis.patch.yml` 里的——那个文件会被同步、备份、进仓库、贴进 issue。现在它是一串密文，解开的钥匙在**另一个目录树**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`，POSIX 0600）里的 32 字节随机数当 HKDF-SHA256 的 IKM，**本机指纹**（平台 + 架构 + 主机名 + 用户名）当 salt，派生出 AES-256-GCM 的 key，密文里带随机 IV 与认证标签。所以「同步了 profile、没同步密钥」的结果是**读不出来并明确报错**，而不是静默用一个别人的凭据。
 
   实现落在 `src/secret.ts`（新）：`sealSecret` / `openSecret`，信封格式 `enc:v1:` + base64url(IV ‖ tag ‖ 密文)；结构性错误（前缀/编码/长度不成立）报 `malformed`，密钥文件缺失或不可用报 `key-missing` / `key-unreadable`，GCM 认证失败报 `auth-failed`（AEAD 分不出「载荷被篡改」和「钥匙不对」，两者共用这个码）——**分开**的理由：前者是「值坏了」，后者是「值好好的但你打不开」，用户要做的事完全不同。密钥文件首次使用时原子创建（`wx` + 临时文件重命名），文件权限按 POSIX 收紧到 0600。
 

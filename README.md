@@ -58,7 +58,7 @@ config:
   wpsSid: enc:v1:<base64url(IV ‖ GCM tag ‖ 密文)>
 ```
 
-解开的钥匙**不在同一棵目录树里**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`，权限 0600）里的随机盐，加上**本机指纹**（平台 / 架构 / 主机名 / 用户名）经 scrypt 派生出 AES-256-GCM 的 key。密文自带随机 IV 与认证标签，改一个字节就会解密失败。
+解开的钥匙**不在同一棵目录树里**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`；POSIX 上收紧到 0600，Windows 上靠用户目录的继承 ACL）里的 32 字节随机数当 HKDF-SHA256 的输入密钥材料，**本机指纹**（平台 / 架构 / 主机名 / 用户名）当 salt，派生出 AES-256-GCM 的 key。密文自带随机 IV 与认证标签，改一个字节就会解密失败（报 `auth-failed`——GCM 分不出「被篡改」和「钥匙不对」，这两件事共用同一个原因码）。
 
 存储状态有四种，卡片的状态行会报出当前那一种是哪一种（`doctor` 报的是同一套名字，但它读的是 `WPS_COMATE_SID` 环境变量 —— 一个独立的 CLI 进程读不到 DSH 的 profile 设置文档，所以卡片存的那份要看卡片状态行）：
 
