@@ -47,7 +47,8 @@
     "test": "vitest run",
     "verify:installed": "node scripts/verify-installed.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "verify:shim": "node scripts/verify-shim-live.mjs"
   },
   "dsh": {
     "bundle": {

@@ -106,9 +106,18 @@ WPS_COMATE_LIVE=1 npx vitest run tests/multimodal-live.spec.ts
 
 # 安装产物：覆盖安装后跑这个。源码绿 ≠ 产物绿（0.3.2 就是这么翻车的）
 WPS_COMATE_SID=<sid> pnpm run verify:installed
+
+# 整条 HTTP 链路：真起 shim、真凭据、真上游。上面两个直接调函数，
+# 验的是层内；这个验的是 DSH → pi-ai → shim(HTTP) → adapter → 上游 的接缝
+COMATE_PKG_DIR=<插件安装目录> pnpm run verify:shim
 ```
 
-两个都复刻真机出问题的那次请求形状（图片来自 `read_image` 工具结果、放在 tool 消息里），
+`verify:shim` 默认只打 `mimo-v2.5`（修复前唯一失败的模型），要全矩阵就加
+`COMATE_LIVE_MODELS=deepseek-v4.1-flash,MiniMax-M3,kimi-k3,glm-5.3-flash,mimo-v2.5`。
+它还断言 shim 的图片计数是 `externalized=1 upload_failed=0`——出站是 URL 而不是 inline
+base64，才是图片外置真正要钉住的东西。
+
+三个都复刻真机出问题的那次请求形状（图片来自 `read_image` 工具结果、放在 tool 消息里），
 对 5 个多模态模型各发一次，断言：模型答出图片的**两个颜色**、且出站载荷是上传后的 URL。
 默认套件无网（`vitest run` 不依赖登录态）。
 

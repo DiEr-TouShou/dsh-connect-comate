@@ -16,6 +16,7 @@
 
 - 测试 158 → 185 例（+1 例真机验收，默认跳过）。新增 `tests/assets.spec.ts`（16 例：三步请求形状、Cookie、缓存命中、临近到期重签、失败降级、非零 code、抛异常）与 `tests/multimodal-live.spec.ts`（`WPS_COMATE_LIVE=1` 门控的 5 模型真机矩阵）；`tests/adapter-attachments.spec.ts` 与 `tests/multimodal.spec.ts` 补外置接线与计数（含「上传器抛异常请求照发」）。
 - 新增 `scripts/verify-installed.mjs`（`pnpm run verify:installed`）：直接 import **已构建的 lib/** 跑同一个矩阵——源码绿 ≠ 产物绿（0.3.2 就是这么翻车的）。
+- 新增 `scripts/verify-shim-live.mjs`（`pnpm run verify:shim`）：**真的把 shim 起在 127.0.0.1 上**、用真凭据打一次 HTTP（DSH → pi-ai → shim → adapter → 上游的接缝，前两个脚本直接调函数、验不到这层），并断言 shim 的计数是 `externalized=1 upload_failed=0`。对安装产物跑：5/5。
 - **验收断言自身修正**：第一版只断言「有正文」，结果安装产物矩阵里 MiniMax 回了「I attempted to read the image file …, but …」也被判通过。改用**左红右蓝两色图**、要求两色都答出：取不到图的模型会明确失败，而不是留下一条看似正常的话。
 - 真机验收（2026-09-25）：源码树与安装产物各跑一次，均 5/5（两色都答对，出站载荷均为 `url`、`ext=1 fail=0`）。针对性对照：同一张两色图，MiniMax 在 URL 与 base64 下都答对；`mimo-v2.5` 在 URL 下答对、在 base64 下报 `unsupported message.content type=image`。
 
