@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.2 (2026-09-25)
+
+### Bug Fixes
+
+- **图片输入真的能用了（多模态链路补齐）。** 0.3.x 之前，真机上 `llm_types` 是 **JSON 数组**（`["llm-chat", "llm-multimodal"]`），而 `parseComateModel` 只认空格分隔的字符串，于是 `llmTypes` 恒为 `undefined`——本机 10 个模型里 5 个带多模态标记的模型在 DSH 里**全部失去图片输入能力**。测试数据当时用的是字符串，所以 128 例全绿而真机功能缺失。现在数组/字符串两种形状都收，并支持 `multimodal: boolean` 覆盖字段（与桌面端 `isModelMultimodal` 同序）。
+
+### Features
+
+- **出站图片线形状修正（`src/multimodal.ts`）。** 本机直连 `llmproxy/v1/user/chat/completions` 实测四种形状，每种都只看模型是否答对颜色：
+
+  | 发送形状 | 实测结果 |
+  | --- | --- |
+  | `image_url: { url: 'data:image/png;base64,<真 base64>' }` | HTTP 200，答对颜色，响应 id 前缀 `llm-multimodal-` |
+  | `image_url: '<data URL 字符串>'`（裸字符串） | HTTP 200，答 `Unknown` —— 图片被静默丢弃 |
+  | `data:image/png;base64,https://…`（假 base64 前缀套 URL） | HTTP 200，**正文为空** —— 静默失败 |
+  | `data:image/svg+xml;base64,…` | HTTP 200，**正文为空** —— 静默失败 |
+
+  结论：**真 base64 直接被网关接受**，所以插件不需要复刻桌面端的图片上传链（`assets/presign-upload` → ks3 PUT → `presign-download`）——补它是没有证据支撑的复杂度。shim 只做三件把静默失败变成可用请求的事：裸字符串归一成对象形状、假 base64 前缀剥回真实 URL、网关不认的媒体类型（如 svg）换成 `[image omitted: …]` 文字说明（直接丢会得到空正文，用户看到的是一个没有理由的空回答）。改动发生时写一条 `warn` 日志（`seen=/repaired=/stripped=/dropped=`，四个计数全量打印；只在**真的剥掉或丢掉**了图片时才触发——正常路径上 DSH 发的已经是对象形状，归一化零改动）。
+
+  归一化挂在 `prepareChatBody` 上（新增可选的统计参数，纯诊断，不传则行为完全不变），所以命令行、卡片、shim 三条路共用同一份实现。
+
+- **端到端复验（走插件自己的代码路径，不只 curl）。** 上一节的表是裸 HTTP 探针得出的；补全后用 `ComateCredentialStore` → `prepareChatBody` → `ComateUpstreamClient` 这条真实链路复跑：真 96×96 红色 PNG 走**裸字符串**写法发出（`stats={seen:1,repaired:1,stripped:0,dropped:0}`，即归一化确实动手了），模型答 `red`。
+
+- **网关的图片错误形状已确认不静默。** 无效图片时网关回的是 **HTTP 200 + SSE `data: {"error":{...}}`**（原文 `模型参数有误(image data 0 failed: …)`），不是非 2xx。这条形状经实测会浮上来：pi-ai 用 openai SDK 读流，SDK 见到带 `error` 字段的分片就 `throw APIError`，pi-ai 转成 `error` 事件并**保留网关原文**。所以这一处**不需要**在 shim 里加拦截——实测结论直接否掉了一个看起来该写的补丁。
+
+### Tests
+
+- 测试 128 → 155 例。新增 `multimodal.spec.ts`（20 例）把上面那张表逐行钉死，并捕获 **pi-ai 真实请求体**断言编码形状：DSH 侧发出的是对象形式真 base64、本插件的归一化在正常路径上是零改动、描述符不给 `image` 时 pi-ai 会直接丢掉图片（这就是 `llmTypes` 解析错误的代价）。该文件另有一例钉住**外部契约**：`200 + SSE error` 必须变成 pi-ai 的 `error` 事件且保留网关原文（openai SDK 若改掉 `data.error` 的处理，这一例会先红，而不是等用户报「图片发了没反应」）。`auth.spec.ts` 新增数组形状回归、字符串兼容、`multimodal` 布尔覆盖；`upstream.spec.ts` 新增出站归一化与统计计数。
+
+### Packaging
+
+- 版本提到 0.3.2。
+
 ## 0.3.1 (2026-09-25)
 
 ### Bug Fixes

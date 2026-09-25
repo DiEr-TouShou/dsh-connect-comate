@@ -30,7 +30,7 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 - 鉴权：`authHeader=true` → `Authorization: Bearer <apiKey>`，另带 `Cookie`
 - 附加头：`X-Comate-Scene` / `X-Comate-Version` / `X-Request-Id` / `X-Session-Id`
 - 返回：SSE 流式（`stream: true`）
-- 模型目录：**完全从本地 `~/.wpscomate/config.json` 动态读取**，不写死任何模型；随账号、地区、Comate 版本变化自动更新（`llm-multimodal` 标注的模型支持图片输入）
+- 模型目录：**完全从本地 `~/.wpscomate/config.json` 动态读取**，不写死任何模型；随账号、地区、Comate 版本变化自动更新（`llm_types` 数组里带 `llm-multimodal` 的模型支持图片输入，见「图片输入（多模态）」）
 
 > ⚠️ **鉴权现状（重要）**：`~/.wpscomate/config.json` 里的 `apiKey` / `headers.cookie` 是**占位符**（cookie 字面值就是 `COOKIE`）。真实凭据由 Comate UI 每次任务通过本地 websocket 下发（`env.COOKIE` + `modelConfig.apiKey`），不落盘。因此 v0.1 需要**手动填写一次 wps_sid**（见下），或用 `WPS_COMATE_SID` 环境变量。
 
@@ -64,6 +64,27 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 - 选择随设置持久化（`enabledModelIds`），保存后无需重启即生效；
 - **「刷新模型列表」** 让宿主重读本机 Comate 配置（在桌面端刚登录/刚换账号时用，不必重启 DSH）；
 - 模型目录由宿主只读路由 `GET /plugins/dsh-connect-comate/__catalog` 提供（响应含 `signedIn`、`providerRegistered`、`models`，**不含任何凭据**）。宿主不再把目录回写进设置：0.1.7 上设置写入的目标是用户手写的 `cordis.patch.yml`，宿主每次发现变化都去重写它会破坏该文件的注释与格式。
+
+## 图片输入（多模态）
+
+`llm_types` 里带 `llm-multimodal` 的模型会在 DSH 里拿到图片输入能力（本机 10 个模型里 5 个带这个标记）。整条链路的每个环节都有据可查：
+
+| 环节 | 事实 | 依据 |
+| --- | --- | --- |
+| 能力判定 | config 的 `llm_types` 是 **JSON 数组**（`["llm-chat","llm-multimodal"]`）；也接受空格/逗号分隔的字符串，`multimodal: boolean` 优先 | `src/auth.ts` 的 `parseLlmTypes`；与桌面端 `isModelMultimodal` 同序 |
+| DSH 侧编码 | pi-ai 把附件的 `{type:'image', data, mimeType}` 编成 `image_url: { url: 'data:image/png;base64,…' }` | `tests/multimodal.spec.ts` 捕获真实请求体 |
+| 上游接受 | 网关接受**真 base64** 数据 URL，并正确识别图片内容 | 2026-09 本机直连 `llmproxy/v1/user/chat/completions`，96×96 纯色 PNG |
+| 出站归一化 | 裸字符串 `image_url` / 假 base64 前缀 / svg 三种形状会被网关**静默**处理成空正文，插件在出站前修掉 | 同上，四种形状各发一次 |
+
+插件**不做**图片上传。桌面端会把本地图片走 `assets/presign-upload` → ks3 PUT → `presign-download` 换成预签名 URL，但网关实测直接吃 base64，所以这一环对 DSH 是多余的复杂度；将来若网关改成只认 URL，再补它。
+
+出站归一化（`src/multimodal.ts`）只做三件事，每件都把「静默失败」变成「能用的请求」：
+
+1. 裸字符串 `image_url` → 对象形状（字符串形式会被无声丢弃，模型会答 `Unknown`）；
+2. `data:image/*;base64,<http(s) URL>` 的假前缀 → 剥回真实 URL（与桌面端 `fake-base64-image-url.js` 同一正则思路）；
+3. 网关不认的媒体类型（如 svg；桌面端支持集合是 png/jpeg/webp/gif/bmp/x-icon/avif）→ 换成一条 `[image omitted: …]` 文字说明，而不是留下一条空消息、让用户收到一个没有理由的空回答。
+
+真的改动了图片时写一条 `warn` 日志（`seen=/repaired=/stripped=/dropped=`）——网关对这些形状都回 HTTP 200，日志是事后唯一能解释「那次空回答是怎么回事」的痕迹。
 
 ## 测试连接
 

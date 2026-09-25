@@ -41,6 +41,18 @@ export const COMATE_USER_AUTH_RELPATH = join(COMATE_AGENT_SUBDIR, 'auth', 'user_
 /** Default context window when the config omits it (all observed models use 1M). */
 export const COMATE_DEFAULT_CONTEXT_WINDOW = 1_000_000
 
+/**
+ * The Comate marker for image input, one entry of a model's `llm_types`.
+ *
+ * 真机形状（`~/.wpscomate/config.json` → `providers.official.models[]`）：
+ *   `"llm_types": ["llm-chat", "llm-multimodal"]`
+ * 本机 10 个模型里 5 个带这个标记。
+ */
+export const COMATE_MULTIMODAL_TYPE = 'llm-multimodal'
+
+/** The chat marker every catalogued model carries. */
+export const COMATE_CHAT_TYPE = 'llm-chat'
+
 /** Default DSH output budget; the Comate config exposes no max-output field. */
 export const COMATE_DEFAULT_MAX_TOKENS = 32_000
 
@@ -49,8 +61,12 @@ export interface ComateModel {
   id: string
   name: string
   contextWindow: number
-  /** e.g. `llm-chat`, `llm-multimodal`. */
-  llmTypes?: string
+  /**
+   * Normalized `llm_types`, e.g. `['llm-chat', 'llm-multimodal']`. Always an
+   * array: the desktop config ships one, and the string spelling is accepted
+   * only as a legacy/alternate shape (see {@link parseLlmTypes}).
+   */
+  llmTypes?: string[]
   modelSource?: string
   modelTier?: string
 }
@@ -124,6 +140,32 @@ export function defaultConfigCandidates(
   return [join(root, COMATE_CONFIG_FILENAME), join(root, COMATE_AGENT_SUBDIR, COMATE_MODELS_FILENAME)]
 }
 
+/**
+ * Normalize one model's `llm_types` into a trimmed, de-duplicated array.
+ *
+ * 两种形状都收：真机是 **JSON 数组**（`["llm-chat", "llm-multimodal"]`），
+ * 而本模块最初的实现只认空格分隔的字符串——于是真机上 `llmTypes` 恒为
+ * `undefined`，5 个多模态模型在 DSH 里全部失去图片输入能力（测试数据用的是
+ * 字符串，所以 128 例全绿而真机功能缺失）。字符串分支保留，是为了让旧写法与
+ * 别处副本继续可读，不是主路径。
+ *
+ * @returns the types, or undefined when nothing usable is present.
+ */
+export function parseLlmTypes(value: unknown): string[] | undefined {
+  const entries: unknown[] = typeof value === 'string'
+    ? value.split(/[\s,]+/)
+    : Array.isArray(value)
+      ? value
+      : []
+  const types: string[] = []
+  for (const entry of entries) {
+    if (typeof entry !== 'string') continue
+    const type = entry.trim()
+    if (type !== '' && !types.includes(type)) types.push(type)
+  }
+  return types.length === 0 ? undefined : types
+}
+
 /** Parse one config model entry; entries without an id are dropped. */
 export function parseComateModel(value: unknown): ComateModel | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -139,9 +181,10 @@ export function parseComateModel(value: unknown): ComateModel | undefined {
   const contextWindow = typeof contextValue === 'number' && contextValue > 0
     ? contextValue
     : COMATE_DEFAULT_CONTEXT_WINDOW
-  const llmTypes = typeof raw['llm_types'] === 'string' && raw['llm_types'] !== ''
-    ? raw['llm_types'] as string
-    : undefined
+  const llmTypes = typeof raw['multimodal'] === 'boolean'
+    // 桌面端 `isModelMultimodal` 先认 `multimodal: boolean` 覆盖字段，这里同序。
+    ? [COMATE_CHAT_TYPE, ...raw['multimodal'] === true ? [COMATE_MULTIMODAL_TYPE] : []]
+    : parseLlmTypes(raw['llm_types'])
   const modelSource = typeof raw['model_source'] === 'string' && raw['model_source'] !== ''
     ? raw['model_source'] as string
     : undefined

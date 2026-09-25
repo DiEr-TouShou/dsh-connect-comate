@@ -10,6 +10,9 @@
  * 改动：模型描述符的多模态由 Comate config 的 llm_types 判定
  *   （`llm-multimodal` → 图片输入），而非用户手动勾选；输出上限用
  *   COMATE_DEFAULT_MAX_TOKENS（config 无 max-output 字段）。
+ *   `llm_types` 在真机上是**数组**（本机 10 个模型里 5 个带多模态标记），
+ *   归一化在 `auth.ts` 的 `parseLlmTypes`；出站图片的线形状修正在
+ *   `multimodal.ts`（实测网关对裸字符串/假 base64/svg 会静默给空正文）。
  *
  * @module dsh-connect-comate/adapter
  */
@@ -20,7 +23,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import { COMATE_DEFAULT_MAX_TOKENS, type ComateModel } from './auth.ts'
+import { COMATE_DEFAULT_MAX_TOKENS, COMATE_MULTIMODAL_TYPE, type ComateModel } from './auth.ts'
 import type { ComateCatalog } from './catalog.ts'
 import type { ComateShim } from './shim.ts'
 
@@ -78,9 +81,15 @@ export interface ComateAdapter {
   invalidate: () => void
 }
 
-/** pi-ai input modalities: images only when Comate advertises `llm-multimodal`. */
+/**
+ * pi-ai input modalities: images only when Comate advertises `llm-multimodal`.
+ *
+ * `llmTypes` 是数组（见 `auth.ts` 的 `parseLlmTypes`）。真机 10 个模型里 5 个带
+ * `llm-multimodal`，网关也确认接受 base64 图片（`multimodal.ts` 里有实测表），
+ * 所以这个函数是「DSH 允许附图片」的唯一开关。
+ */
 export function comateModelInput(model: ComateModel): ('text' | 'image')[] {
-  return model.llmTypes !== undefined && model.llmTypes.includes('llm-multimodal')
+  return model.llmTypes?.includes(COMATE_MULTIMODAL_TYPE) === true
     ? ['text', 'image']
     : ['text']
 }

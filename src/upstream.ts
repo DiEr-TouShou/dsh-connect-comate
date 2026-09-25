@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ComateCredential } from './auth.ts'
 import type { UpstreamErrorKind } from './bridge.ts'
+import { emptyImageStats, normalizeChatImages, type ImageSanitizeStats } from './multimodal.ts'
 
 /**
  * Upstream failure classes the shim maps onto distinct HTTP answers.
@@ -73,13 +74,19 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
 }
 
 /**
- * Normalize an OpenAI chat-completions body for the Comate upstream:
- * force `stream: true` (the Comate client streams SSE) and flatten
- * `tool_choice` (object forms are a common 400 source on custom gateways).
- * `developer` role is rewritten to `system` defensively; if the gateway
- * rejects `system`, remove this rewrite and re-test.
+ * Normalize an OpenAI chat-completions body for the Comate upstream: force
+ * `stream: true` (the Comate client streams SSE), flatten `tool_choice` (object
+ * forms are a common 400 source on custom gateways), and repair the image
+ * content shapes the gateway mishandles silently (see `multimodal.ts` for the
+ * probe table). `developer` role is rewritten to `system` defensively; if the
+ * gateway rejects `system`, remove this rewrite and re-test.
+ *
+ * @param source - the raw request body as received by the shim.
+ * @param imageStats - optional accumulator; when passed, it is filled with what
+ * the image pass saw and changed so the caller can log it. Purely diagnostic:
+ * omitting it changes no behaviour.
  */
-export function prepareChatBody(source: string): string {
+export function prepareChatBody(source: string, imageStats?: ImageSanitizeStats): string {
   let body: unknown
   try {
     body = JSON.parse(source)
@@ -97,6 +104,7 @@ export function prepareChatBody(source: string): string {
     }
   }
   normalizeToolChoice(obj)
+  normalizeChatImages(obj, imageStats ?? emptyImageStats())
   return JSON.stringify(obj)
 }
 

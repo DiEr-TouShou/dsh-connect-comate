@@ -19,6 +19,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Readable } from 'node:stream'
 import type { ComateCredentialStore } from './auth.ts'
 import type { ComateCatalog } from './catalog.ts'
+import { emptyImageStats } from './multimodal.ts'
 import { prepareChatBody, ComateUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -250,7 +251,16 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
     }
 
     const raw = (await readBody(req)).toString('utf8')
-    const prepared = prepareChatBody(raw)
+    const imageStats = emptyImageStats()
+    const prepared = prepareChatBody(raw, imageStats)
+    // 只在真的改动了图片时才发声：网关对裸字符串/假 base64/svg 会返回 200 + 空
+    // 正文，日志是事后唯一能看出「那次空回答是怎么回事」的地方。
+    if (imageStats.stripped > 0 || imageStats.dropped > 0) {
+      logger?.warn(
+        `dsh-connect-comate: image content normalized (seen=${imageStats.seen},`
+        + ` repaired=${imageStats.repaired}, stripped=${imageStats.stripped}, dropped=${imageStats.dropped})`,
+      )
+    }
 
     const controller = new AbortController()
     req.on('close', () => controller.abort())

@@ -5,10 +5,12 @@ import { describe, expect, it } from 'vitest'
 import {
   COMATE_DEFAULT_CONTEXT_WINDOW,
   COMATE_HOME_DIRNAME,
+  COMATE_MULTIMODAL_TYPE,
   ComateCredentialStore,
   defaultComateHome,
   parseComateConfig,
   parseComateModel,
+  parseLlmTypes,
 } from '../src/auth.ts'
 
 const SAMPLE_CONFIG = JSON.stringify({
@@ -21,8 +23,9 @@ const SAMPLE_CONFIG = JSON.stringify({
       baseUrl: 'https://comate.wps.cn/llmproxy/v1/user',
       headers: { cookie: 'wps_sid=abc' },
       models: [
-        { id: 'test/model-chat//public', name: 'model-chat', context_window: 1000000, llm_types: 'llm-chat', model_source: 'public', model_tier: 'pro' },
-        { id: 'test/model-multimodal//public', name: 'model-multimodal', context_window: 1000000, llm_types: 'llm-chat llm-multimodal', model_source: 'public', model_tier: 'pro' },
+        // 真机形状：`llm_types` 是数组。
+        { id: 'test/model-chat//public', name: 'model-chat', context_window: 1000000, llm_types: ['llm-chat'], model_source: 'public', model_tier: 'pro' },
+        { id: 'test/model-multimodal//public', name: 'model-multimodal', context_window: 1000000, llm_types: ['llm-chat', 'llm-multimodal'], model_source: 'public', model_tier: 'pro' },
       ],
     },
   },
@@ -39,7 +42,8 @@ describe('parseComateConfig', () => {
     expect(credential?.authHeader).toBe(true)
     expect(credential?.configFile).toBe('C:/fake/config.json')
     expect(credential?.models).toHaveLength(2)
-    expect(credential?.models[0]).toMatchObject({ id: 'test/model-chat//public', contextWindow: 1_000_000, llmTypes: 'llm-chat' })
+    expect(credential?.models[0]).toMatchObject({ id: 'test/model-chat//public', contextWindow: 1_000_000, llmTypes: ['llm-chat'] })
+    expect(credential?.models[1]?.llmTypes).toEqual(['llm-chat', COMATE_MULTIMODAL_TYPE])
   })
 
   it('rejects documents without providers.official', () => {
@@ -60,6 +64,33 @@ describe('parseComateConfig', () => {
   })
 })
 
+describe('parseLlmTypes', () => {
+  /**
+   * 真机回归：`~/.wpscomate/config.json` 里的 `llm_types` 是 JSON 数组。最初的实现
+   * 只认字符串，于是真机上 llmTypes 恒为 undefined——5 个多模态模型在 DSH 里全部
+   * 拿不到图片输入，而当时的测试数据是字符串，所以整套测试依然是绿的。
+   */
+  it('accepts the array shape the real config ships', () => {
+    expect(parseLlmTypes(['llm-chat', 'llm-multimodal'])).toEqual(['llm-chat', 'llm-multimodal'])
+  })
+
+  it('still accepts the legacy string spelling', () => {
+    expect(parseLlmTypes('llm-chat llm-multimodal')).toEqual(['llm-chat', 'llm-multimodal'])
+    expect(parseLlmTypes('llm-chat,llm-multimodal')).toEqual(['llm-chat', 'llm-multimodal'])
+  })
+
+  it('trims, de-duplicates and drops non-string entries', () => {
+    expect(parseLlmTypes([' llm-chat ', 'llm-chat', 'llm-multimodal', 42, null, ''])).toEqual(['llm-chat', 'llm-multimodal'])
+  })
+
+  it('reports nothing usable as undefined', () => {
+    expect(parseLlmTypes([])).toBeUndefined()
+    expect(parseLlmTypes('   ')).toBeUndefined()
+    expect(parseLlmTypes(undefined)).toBeUndefined()
+    expect(parseLlmTypes({ llm_types: ['llm-chat'] })).toBeUndefined()
+  })
+})
+
 describe('parseComateModel', () => {
   it('defaults missing context_window and tolerates alias fields', () => {
     const model = parseComateModel({ id: 'x/y//public', name: 'z', contextWindow: 512000 })
@@ -71,6 +102,17 @@ describe('parseComateModel', () => {
   it('drops entries without an id', () => {
     expect(parseComateModel({ name: 'no-id' })).toBeUndefined()
     expect(parseComateModel(42)).toBeUndefined()
+  })
+
+  /**
+   * 桌面端 `isModelMultimodal` 先看 `multimodal: boolean` 覆盖字段，再回落到
+   * `llm_types`；这里同序，免得同一个模型在两处给出相反的能力声明。
+   */
+  it('lets a boolean multimodal field override llm_types', () => {
+    expect(parseComateModel({ id: 'a', llm_types: ['llm-chat'], multimodal: true })?.llmTypes)
+      .toEqual(['llm-chat', COMATE_MULTIMODAL_TYPE])
+    expect(parseComateModel({ id: 'a', llm_types: ['llm-chat', 'llm-multimodal'], multimodal: false })?.llmTypes)
+      .toEqual(['llm-chat'])
   })
 })
 
