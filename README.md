@@ -101,10 +101,16 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 真机验收（默认跳过，需要登录态）：
 
 ```bash
+# 源码树：两色图 + 断言两色都答出（只查「有正文」会放过「我读不到这张图」）
 WPS_COMATE_LIVE=1 npx vitest run tests/multimodal-live.spec.ts
+
+# 安装产物：覆盖安装后跑这个。源码绿 ≠ 产物绿（0.3.2 就是这么翻车的）
+WPS_COMATE_SID=<sid> pnpm run verify:installed
 ```
 
-它复刻真机出问题的那次请求形状（图片来自 `read_image` 工具结果、放在 tool 消息里），对 5 个多模态模型各发一次，断言：模型答出图片主色、且出站载荷是上传后的 URL 而不是 base64。默认套件无网（`vitest run` 不依赖登录态）。
+两个都复刻真机出问题的那次请求形状（图片来自 `read_image` 工具结果、放在 tool 消息里），
+对 5 个多模态模型各发一次，断言：模型答出图片的**两个颜色**、且出站载荷是上传后的 URL。
+默认套件无网（`vitest run` 不依赖登录态）。
 
 ## 测试连接
 
