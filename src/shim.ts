@@ -18,8 +18,9 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { ComateCredentialStore } from './auth.ts'
+import type { ComateAssetUploader } from './assets.ts'
 import type { ComateCatalog } from './catalog.ts'
-import { emptyImageStats } from './multimodal.ts'
+import { emptyImageStats, emptyUploadStats, uploadChatImages } from './multimodal.ts'
 import { prepareChatBody, ComateUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -50,6 +51,11 @@ export interface ComateShimOptions {
   store: ComateCredentialStore
   client: Pick<ComateUpstreamClient, 'chatStream'>
   catalog: ComateCatalog
+  /**
+   * 把 inline base64 图片换成可抓取 URL 的上传器。不传则不外置：图片以 base64
+   * 原样发出（本机 5 个多模态模型里有 4 个吃 base64，`mimo-v2.5` 不吃）。
+   */
+  uploader?: ComateAssetUploader
   logger?: ShimLogger
 }
 
@@ -150,7 +156,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
  * the loopback bind alone is not a trust boundary.
  */
 export function createComateShim(options: ComateShimOptions): ComateShim {
-  const { store, client, catalog } = options
+  const { store, client, catalog, uploader } = options
   const logger = options.logger
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
@@ -251,19 +257,34 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
     }
 
     const raw = (await readBody(req)).toString('utf8')
+    const controller = new AbortController()
+    req.on('close', () => controller.abort())
+
     const imageStats = emptyImageStats()
-    const prepared = prepareChatBody(raw, imageStats)
+    const uploadStats = emptyUploadStats()
+    // 两遍，顺序不能倒：先归一化（同步、纯）把图片收成「对象形状 + 真 base64」一种
+    // 形式，再外置（异步、有网）把它换成可抓取 URL。
+    let prepared = prepareChatBody(raw, imageStats)
+    try {
+      prepared = await uploadChatImages(prepared, uploader, credential, uploadStats)
+    } catch (error: unknown) {
+      // 外置只是优化路径，任何意外都不该让请求失败：退回 base64 继续发。
+      logger?.warn('dsh-connect-comate: image externalization failed, sending inline images', error)
+    }
     // 只在真的改动了图片时才发声：网关对裸字符串/假 base64/svg 会返回 200 + 空
     // 正文，日志是事后唯一能看出「那次空回答是怎么回事」的地方。
-    if (imageStats.stripped > 0 || imageStats.dropped > 0) {
+    if (
+      imageStats.stripped > 0 || imageStats.dropped > 0
+      || uploadStats.externalized > 0 || uploadStats.failed > 0
+    ) {
       logger?.warn(
-        `dsh-connect-comate: image content normalized (seen=${imageStats.seen},`
-        + ` repaired=${imageStats.repaired}, stripped=${imageStats.stripped}, dropped=${imageStats.dropped})`,
+        `dsh-connect-comate: image content handled (seen=${imageStats.seen},`
+        + ` repaired=${imageStats.repaired}, stripped=${imageStats.stripped},`
+        + ` dropped=${imageStats.dropped}, externalized=${uploadStats.externalized},`
+        + ` upload_failed=${uploadStats.failed})`,
       )
     }
 
-    const controller = new AbortController()
-    req.on('close', () => controller.abort())
     const result = await client.chatStream(credential, prepared, controller.signal)
 
     if (!result.ok) {

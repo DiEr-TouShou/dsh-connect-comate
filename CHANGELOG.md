@@ -1,6 +1,29 @@
 # Changelog
 
+## 0.3.3-rc.1 (2026-09-25)
+
+### Bug Fixes
+
+- **图片外置（上传换 URL）：`mimo-v2.5` 发 base64 被网关拒。** 真机实测：`deepseek-v4.1-flash`、`MiniMax-M3`、`kimi-k3`、`glm-5.3-flash` 带图正常，`mimo-v2.5` 整轮失败，上游原文是 `请求参数值有误(unsupported message.content type=image)`（`PI_AI_ERROR`）。用插件自己的真实链路对 5 个模型 × 三种图片形状跑矩阵，定位到：mimo 的**多模态路由是通的**（日志里出现 `route=llm-multimodal-xiaomi-mimo-v2.5`），只是**不收 inline base64**——同一张图换成 URL 载荷就成功。既然桌面端对所有模型都先上传换预签名 URL，URL 才是这条链路的标准形状，base64 只是碰巧对 4 个模型可用。新增 `src/assets.ts`：
+
+  - 复刻桌面端的 `assets/presign-upload` → ks3 PUT → `presign-download` 三步（同一套接口、同样只带 Cookie）；
+  - 按**内容哈希**缓存（含下载 URL 到期时间）：同一张图在多轮里只上传一次，URL 临近过期只重签不重传；
+  - **尽力而为**：无 Cookie / 网络失败 / 非零 code / 抛异常都退回 inline base64 继续发，请求不因此失败；上传器在 shim 里抛异常也只写 warn，不冒泡；
+  - 归一化与外置**分两遍**且顺序固定（先同步归一化收成一种形状，再异步外置），因为「网关不认的形状」不该先花一次网络往返；
+  - 无条件外置（不按模型名匹配），但保留降级——`mimo-v2.5` 修好，其余 4 个的降级路径不变。
+
+### Tests
+
+- 测试 158 → 185 例（+1 例真机验收，默认跳过）。新增 `tests/assets.spec.ts`（16 例：三步请求形状、Cookie、缓存命中、临近到期重签、失败降级、非零 code、抛异常）与 `tests/multimodal-live.spec.ts`（`WPS_COMATE_LIVE=1` 门控的 5 模型真机矩阵）；`tests/adapter-attachments.spec.ts` 与 `tests/multimodal.spec.ts` 补外置接线与计数（含「上传器抛异常请求照发」）。
+- 真机验收（2026-09-25）：5/5 模型答出图片主色，出站载荷均为 `url`（`ext=1 fail=0`），其中 `mimo-v2.5` 是修复前唯一失败的模型。
+
+### Packaging
+
+- 版本 0.3.3 → **0.3.3-rc.1**（0.3.3 从未发布，只在本机覆盖过；这条线按 RC 计。注：按 semver，`0.3.3-rc.1` 的排序低于 `0.3.3`，发布时若仍要 0.3.3 作正式版，这就是它的最后一个预发布）。
+
 ## 0.3.3 (2026-09-25)
+
+> 未发布：只在本机 desktop profile 覆盖安装过（版本号分开是为了区分机器上装的是哪一份）。
 
 ### Bug Fixes
 

@@ -74,10 +74,19 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 | 能力判定 | config 的 `llm_types` 是 **JSON 数组**（`["llm-chat","llm-multimodal"]`）；也接受空格/逗号分隔的字符串，`multimodal: boolean` 优先 | `src/auth.ts` 的 `parseLlmTypes`；与桌面端 `isModelMultimodal` 同序 |
 | 宿主附件服务 | pi-ai 的 context builder **只能**通过宿主的 durable attachment service（`readImageRequest`）拿到图片字节；没接线时它回退到 text-only 分支，**任何带图片的请求整轮失败**（`UNSUPPORTED_CONTENT`），而纯文本请求照常——这正是 0.3.2 的机器现象 | `src/adapter.ts` 的 `resolveAttachments` / `resolveImageAccess`；与宿主自身 pi-ai provider 逐字同源（`resolveAttachments: () => ctx.get("attachments")`）；`tests/adapter-attachments.spec.ts` 以真 adapter + 真 shim 复现并修住 |
 | DSH 侧编码 | pi-ai 把附件的 `{type:'image', data, mimeType}` 编成 `image_url: { url: 'data:image/png;base64,…' }` | `tests/multimodal.spec.ts` 捕获真实请求体 |
-| 上游接受 | 网关接受**真 base64** 数据 URL，并正确识别图片内容 | 2026-09 本机直连 `llmproxy/v1/user/chat/completions`，96×96 纯色 PNG |
+| 上游接受（分模型） | **不是所有模型都吃 base64**：本机 5 个多模态模型里 4 个接受 inline `data:` URL，`mimo-v2.5` 直接拒：`请求参数值有误(unsupported message.content type=image)`。同一张图改成预签名 URL 后 mimo 正常识别 | 2026-09-25 本机直连 `llmproxy/v1/user/chat/completions`，96×96 纯色 PNG，三种形状 × 5 模型矩阵（`tests/multimodal-live.spec.ts`） |
+| 图片外置 | 出站前把 inline base64 换成预签名 URL：`assets/presign-upload` → ks3 PUT → `presign-download`（与桌面端同一套接口、同样只带 Cookie）。同一张图按内容哈希缓存，多轮里只传一次；TTL 临近到期只重签不重传 | `src/assets.ts`；`tests/assets.spec.ts`（请求形状、缓存、降级）、`tests/adapter-attachments.spec.ts`（接线） |
 | 出站归一化 | 裸字符串 `image_url` / 假 base64 前缀 / svg 三种形状会被网关**静默**处理成空正文，插件在出站前修掉 | 同上，四种形状各发一次 |
 
-插件**不做**图片上传。桌面端会把本地图片走 `assets/presign-upload` → ks3 PUT → `presign-download` 换成预签名 URL，但网关实测直接吃 base64，所以这一环对 DSH 是多余的复杂度；将来若网关改成只认 URL，再补它。
+插件**会把图片外置**（`src/assets.ts`）。桌面端就是这么做的：本地图片先走 `assets/presign-upload` → ks3 PUT → `presign-download` 换成预签名 URL 再发给模型。之前以为这一环对 DSH 是多余的（网关实测吃 base64），但那是**分模型**的——`mimo-v2.5` 只收 URL，发 base64 会被网关直接拒掉整轮。既然官方客户端对所有模型都发 URL，URL 才是这条链路的标准形状，base64 只是碰巧对 4 个模型可用。
+
+所以外置是**无条件**的（不按模型名匹配，那太脆），但**尽力而为**：
+
+- 上传器在 shim 里、在归一化之后被调；只有真 base64 数据 URL 会被外置，已有的 http(s) URL 原样通过；
+- 任何一步失败（无 Cookie、网络、非零 code、抛异常）都**退回 inline base64**继续发，请求不因此失败——4 个接受 base64 的模型不受影响，`mimo-v2.5` 退回修复前的行为；
+- 上传器在 shim 里抛异常也只写一条 warn，不冒泡；
+- 内容哈希缓存（含下载 URL 的到期时间）：同一张图在多轮里只上传一次，URL 临近过期时只重签不重传；
+- 被替换/失败时写一条 `warn`（`externalized=` / `upload_failed=`），与归一化的计数同一条日志。
 
 链路上**没有捷径**的一环是上面那行「宿主附件服务」：图片字节由宿主的附件服务持有，本插件只能请求它——所以装配漏了它，解析和出站形状修得再对也到不了网关。反过来说，缺了它时本插件现在会打一条**一次性** `warn`（「附件服务不可用；图片会失败，文本不受影响」），而不是只留用户看到的一句裸 `UNSUPPORTED_CONTENT`。
 
@@ -87,7 +96,15 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 2. `data:image/*;base64,<http(s) URL>` 的假前缀 → 剥回真实 URL（与桌面端 `fake-base64-image-url.js` 同一正则思路）；
 3. 网关不认的媒体类型（如 svg；桌面端支持集合是 png/jpeg/webp/gif/bmp/x-icon/avif）→ 换成一条 `[image omitted: …]` 文字说明，而不是留下一条空消息、让用户收到一个没有理由的空回答。
 
-真的改动了图片时写一条 `warn` 日志（`seen=/repaired=/stripped=/dropped=`）——网关对这些形状都回 HTTP 200，日志是事后唯一能解释「那次空回答是怎么回事」的痕迹。
+真的改动了图片时写一条 `warn` 日志（`seen=/repaired=/stripped=/dropped=/externalized=/upload_failed=`）——网关对这些形状都回 HTTP 200，日志是事后唯一能解释「那次空回答是怎么回事」的痕迹。
+
+真机验收（默认跳过，需要登录态）：
+
+```bash
+WPS_COMATE_LIVE=1 npx vitest run tests/multimodal-live.spec.ts
+```
+
+它复刻真机出问题的那次请求形状（图片来自 `read_image` 工具结果、放在 tool 消息里），对 5 个多模态模型各发一次，断言：模型答出图片主色、且出站载荷是上传后的 URL 而不是 base64。默认套件无网（`vitest run` 不依赖登录态）。
 
 ## 测试连接
 

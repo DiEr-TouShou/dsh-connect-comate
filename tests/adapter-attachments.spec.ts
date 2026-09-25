@@ -7,6 +7,7 @@ import { COMATE_PROVIDER, createComateAdapter, type ComateAttachmentService } fr
 import { ComateCatalog } from '../src/catalog.ts'
 import { ComateCredentialStore } from '../src/auth.ts'
 import { createComateShim } from '../src/shim.ts'
+import type { ComateAssetUploader } from '../src/assets.ts'
 import type { ComateChatResult } from '../src/upstream.ts'
 
 /**
@@ -113,7 +114,7 @@ interface RunResult {
  * the (stubbed) upstream client. `wireAttachments: false` builds the adapter the
  * way it was built when the machine failed.
  */
-async function runImageRequest(wireAttachments: boolean): Promise<RunResult> {
+async function runImageRequest(wireAttachments: boolean, uploader?: ComateAssetUploader): Promise<RunResult> {
   const dir = mkdtempSync(join(tmpdir(), 'comate-attach-'))
   const configFile = join(dir, 'config.json')
   writeFileSync(configFile, CONFIG, 'utf8')
@@ -136,6 +137,7 @@ async function runImageRequest(wireAttachments: boolean): Promise<RunResult> {
   const shim = createComateShim({
     store,
     catalog,
+    ...(uploader === undefined ? {} : { uploader }),
     logger: {
       warn: (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) },
       error: () => {},
@@ -219,5 +221,74 @@ describe('an image in the message history', () => {
     // 一条 warn，真正需要那条日志的那次就淹了。
     const { warnings } = await runImageRequest(true)
     expect(warnings).toEqual([])
+  })
+})
+
+/** 取 forwarded[0] 里第一条消息的 content 数组。 */
+function imageContentOf(forwarded: string[]): Array<Record<string, unknown>> {
+  const messages = (JSON.parse(forwarded[0] ?? '') as {
+    messages: Array<{ content: unknown }>
+  }).messages
+  return messages[0]?.content as Array<Record<string, unknown>>
+}
+
+/**
+ * 图片外置：`mimo-v2.5` 只收 URL 载荷（本机实测，见 `src/assets.ts` 模块头）。
+ *
+ * 这里验的是「接线是否真的接上了」：上传器在 shim 里、在归一化之后被调到，
+ * 失败也不影响请求。上传器自身的三步与缓存由 `tests/assets.spec.ts` 单独验。
+ */
+describe('image externalization', () => {
+  it('forwards the uploaded url instead of inline base64', async () => {
+    const uploaded: string[] = []
+    const uploader: ComateAssetUploader = {
+      async upload(dataUrl: string) {
+        uploaded.push(dataUrl)
+        return 'https://ks3.test/up.png?X-Amz-Expires=900'
+      },
+    }
+
+    const { forwarded, failure, warnings } = await runImageRequest(true, uploader)
+
+    expect(failure).toBeUndefined()
+    // 上传器拿到的是归一化之后的真 base64（顺序：先归一化，再外置）。
+    expect(uploaded).toHaveLength(1)
+    expect(uploaded[0]).toBe(`data:image/png;base64,${PNG_B64}`)
+    const content = imageContentOf(forwarded)
+    expect(content[2]).toEqual({
+      type: 'image_url',
+      image_url: { url: 'https://ks3.test/up.png?X-Amz-Expires=900' },
+    })
+    expect(warnings.join('\n')).toContain('externalized=1')
+  })
+
+  it('falls back to inline base64 when the upload fails', async () => {
+    const uploader: ComateAssetUploader = { async upload() { return undefined } }
+
+    const { forwarded, failure, warnings } = await runImageRequest(true, uploader)
+
+    // 上传失败只是少一次优化：请求照发，base64 照旧（4/5 个模型吃它）。
+    expect(failure).toBeUndefined()
+    expect(imageContentOf(forwarded)[2]).toEqual({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${PNG_B64}` },
+    })
+    expect(warnings.join('\n')).toContain('upload_failed=1')
+  })
+
+  it('keeps the request alive when the uploader throws', async () => {
+    const uploader: ComateAssetUploader = {
+      async upload() { throw new Error('uploader exploded') },
+    }
+
+    const { forwarded, failure, warnings } = await runImageRequest(true, uploader)
+
+    expect(failure).toBeUndefined()
+    expect(forwarded).toHaveLength(1)
+    expect(imageContentOf(forwarded)[2]).toEqual({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${PNG_B64}` },
+    })
+    expect(warnings.join('\n')).toContain('image externalization failed')
   })
 })

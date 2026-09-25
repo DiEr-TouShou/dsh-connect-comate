@@ -13,9 +13,9 @@
  * | `data:image/png;base64,https://…`（假 base64 前缀套 URL） | HTTP 200，**正文为空** —— 静默失败 |
  * | `data:image/svg+xml;base64,…` | HTTP 200，**正文为空** —— 静默失败 |
  *
- * 结论：**真 base64 直接被网关接受**，所以插件不需要复刻桌面端的图片上传链
- * （`assets/presign-upload` → ks3 PUT → `presign-download`）。本模块只做三件
- * 事，每一件都是「把静默失败变成能用的请求」：
+ * 结论：**真 base64 直接被网关接受**（本机 5 个多模态模型里 4 个如此），所以本模块
+ * 不需要复刻桌面端的图片上传链。本模块只做三件事，每一件都是「把静默失败变成能用
+ * 的请求」，并且保持**同步、纯函数**（无网络、无日志）：
  *
  *   1. 裸字符串 `image_url` 归一成上游认的对象形状（字符串形式会被无声丢弃）；
  *   2. 假 base64 前缀剥回真实 URL（与桌面端
@@ -24,11 +24,18 @@
  *      替换成一条文字说明——直接丢掉会得到空正文，替换成文字至少让模型和用户
  *      知道发生了什么，而不是收到一个没有理由的空回答。
  *
- * 反向代理的边界：**不做**图片上传/预签名。将来若网关改成只认 URL，再补那一环；
- * 现在补它是没有证据支撑的复杂度。
+ * 补充实测（2026-09-25，同一张 96×96 PNG）：**inline base64 对 `mimo-v2.5` 必失败**
+ * （`unsupported message.content type=image`），而换成 URL 载荷后 5/5 模型全部答对。
+ * 即 base64 只是「多数模型能用」，不是通用形式。因此 `assets.ts` 里有一条
+ * presign 上传链（图片字节 → 对象存储 → 临时 URL），由 shim 在本模块归一化**之后**
+ * 调用 {@link uploadChatImages} 把 inline base64 换成 URL。本模块仍不碰网络：
+ * 上传是独立的一遍，失败就保留 base64 原样发出。
  *
  * @module dsh-connect-comate/multimodal
  */
+
+import type { ComateAssetUploader } from './assets.ts'
+import type { ComateCredential } from './auth.ts'
 
 /**
  * Image media types the Comate pipeline handles.
@@ -189,4 +196,100 @@ export function normalizeChatImages(
     message['content'] = next
   }
   return stats
+}
+
+/** 图片外置（上传换 URL）的统计。 */
+export interface ImageUploadStats {
+  /** 图片被换成上传后的 URL（含命中上传器缓存）。 */
+  externalized: number
+  /** 上传失败、保留 base64 原样发出的图片数。 */
+  failed: number
+}
+
+/** A zeroed upload-stats record. */
+export function emptyUploadStats(): ImageUploadStats {
+  return { externalized: 0, failed: 0 }
+}
+
+/** 真 base64 图片 data URL；其余（裸 URL、假 base64 已被前一遍剥掉）不碰。 */
+const INLINE_IMAGE_DATA_URL_RE = /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?;base64,/i
+
+/** 取到能就地改写 `url` 的那个对象，兼容对象与字符串两种 `image_url` 拼法。 */
+function imageUrlHolder(part: Record<string, unknown>): Record<string, unknown> | undefined {
+  const value = part['image_url']
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value === 'string') {
+    // 未经 normalizeChatImages 的裸字符串：就地升成对象形状再改写。
+    const holder: Record<string, unknown> = { url: value }
+    part['image_url'] = holder
+    return holder
+  }
+  return undefined
+}
+
+/**
+ * 把 body 里 inline base64 的图片换成上传后的 URL。
+ *
+ * 设计要点：
+ * - **在 {@link normalizeChatImages} 之后跑**：那时图片只剩「对象形状 + 真 base64」
+ *   一种形式，这一遍只需认 `data:image/*;base64,`，不必再处理裸字符串/假 base64。
+ * - **逐张降级**：某张图上传失败只影响那一张（保留 base64），不拖累整个请求。
+ * - **同一请求内按 URL 去重**：同一张图在一轮里出现多次（多轮历史）只等一次上传。
+ * - **没有任何改动就返回原字符串**：无图片的请求不重新序列化，字节级不变。
+ *
+ * @param source - 已归一化的请求体 JSON。
+ * @param uploader - 上传器；未注入时直接原样返回（功能关闭）。
+ * @param credential - 当前凭据；无 cookie 时上传器会拒绝，这里照样原样返回。
+ * @param stats - accumulator; filled with what was externalized and what failed.
+ * @returns 改写后的 body JSON，或原字符串。
+ */
+export async function uploadChatImages(
+  source: string,
+  uploader: ComateAssetUploader | undefined,
+  credential: ComateCredential | undefined,
+  stats: ImageUploadStats = emptyUploadStats(),
+): Promise<string> {
+  if (uploader === undefined || credential === undefined) return source
+  // 便宜的前置判断：没有 inline 图片就不解析、不序列化。
+  if (!source.includes('data:image/')) return source
+  let body: unknown
+  try {
+    body = JSON.parse(source)
+  } catch {
+    return source
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return source
+  const messages = (body as Record<string, unknown>)['messages']
+  if (!Array.isArray(messages)) return source
+
+  const inFlight = new Map<string, Promise<string | undefined>>()
+  let changed = false
+  for (const entry of messages) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const content = (entry as Record<string, unknown>)['content']
+    if (!Array.isArray(content)) continue
+    for (const part of content) {
+      if (!isImagePart(part)) continue
+      const holder = imageUrlHolder(part as Record<string, unknown>)
+      if (holder === undefined) continue
+      const url = holder['url']
+      if (typeof url !== 'string' || !INLINE_IMAGE_DATA_URL_RE.test(url.trim())) continue
+      let pending = inFlight.get(url)
+      if (pending === undefined) {
+        pending = uploader.upload(url, credential)
+        inFlight.set(url, pending)
+      }
+      const uploaded = await pending
+      if (uploaded === undefined) {
+        stats.failed += 1
+        continue
+      }
+      holder['url'] = uploaded
+      stats.externalized += 1
+      changed = true
+    }
+  }
+  return changed ? JSON.stringify(body) : source
 }

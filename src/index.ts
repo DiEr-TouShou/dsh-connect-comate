@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import z from '@deepseek-ai/schemastery'
 import { COMATE_PROVIDER, comateModelInput, createComateAdapter } from './adapter.ts'
+import { ComatePresignUploader } from './assets.ts'
 import type { ComateModel } from './auth.ts'
 import { ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
@@ -100,6 +101,23 @@ export {
   type ComateChatResult,
   type UpstreamErrorKind,
 } from './upstream.ts'
+export {
+  COMATE_ASSET_BASE_ENV,
+  ComatePresignUploader,
+  decodeImageDataUrl,
+  downloadUrlExpiry,
+  resolveAssetBase,
+  type ComateAssetUploader,
+} from './assets.ts'
+export {
+  emptyImageStats,
+  emptyUploadStats,
+  normalizeChatImages,
+  sanitizeImageSource,
+  uploadChatImages,
+  type ImageSanitizeStats,
+  type ImageUploadStats,
+} from './multimodal.ts'
 export { COMATE_CONNECT_VERSION } from './version.ts'
 
 /** Stable Cordis plugin name. */
@@ -178,7 +196,9 @@ export function apply(ctx: Context, config: Config): void {
   const store = new ComateCredentialStore()
   const client = new ComateUpstreamClient()
   const catalog = new ComateCatalog()
-  const shim = createComateShim({ store, client, catalog, logger: ctx.logger })
+  // 一个实例 = 一份上传缓存：同一张图（多轮里每轮都会重发）只上传一次。
+  const uploader = new ComatePresignUploader()
+  const shim = createComateShim({ store, client, catalog, uploader, logger: ctx.logger })
 
   let stopped = false
   ctx.effect(() => () => { stopped = true })

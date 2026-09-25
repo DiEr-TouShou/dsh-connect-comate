@@ -4,10 +4,13 @@ import { comateModelInput, comatePiModel } from '../src/adapter.ts'
 import {
   FAKE_BASE64_IMAGE_URL_RE,
   emptyImageStats,
+  emptyUploadStats,
   normalizeChatImages,
   sanitizeImageSource,
+  uploadChatImages,
 } from '../src/multimodal.ts'
-import type { ComateModel } from '../src/auth.ts'
+import type { ComateAssetUploader } from '../src/assets.ts'
+import type { ComateModel, ComateCredential } from '../src/auth.ts'
 import { prepareChatBody } from '../src/upstream.ts'
 
 afterEach(() => {
@@ -297,5 +300,151 @@ describe('in-stream error events', () => {
     expect(events.map(event => event.type)).toContain('error')
     // 网关原文要能到用户眼前，不能被 `Unknown` 或空串替换掉。
     expect(events.find(event => event.type === 'error')?.message).toContain('image data 0 failed')
+  })
+})
+
+/** 一个只记调用的上传器；默认返回一个稳定的假 URL。 */
+function stubUploader(url: string | undefined = 'https://ks3.test/up.png'): ComateAssetUploader & { seen: string[] } {
+  const seen: string[] = []
+  return {
+    seen,
+    async upload(dataUrl: string) {
+      seen.push(dataUrl)
+      return url
+    },
+  }
+}
+
+const CREDENTIAL = {
+  baseUrl: 'https://comate.wps.cn/llmproxy/v1/user',
+  apiKey: 'k',
+  cookie: 'wps_sid=x',
+  authHeader: true,
+  models: [],
+  configFile: 'c.json',
+} as unknown as ComateCredential
+
+/** 一个带图片的请求体（已归一化的形状）。 */
+function imageBody(dataUrl: string, extra?: Record<string, unknown>): string {
+  return JSON.stringify({
+    model: 'm',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: dataUrl } }] }],
+    ...extra,
+  })
+}
+
+const REAL_PNG = `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).toString('base64')}`
+
+describe('uploadChatImages', () => {
+  it('replaces inline base64 with the uploaded url and keeps sibling keys', async () => {
+    const uploader = stubUploader('https://ks3.test/up.png?sig=1')
+    const stats = emptyUploadStats()
+    const source = JSON.stringify({
+      model: 'm',
+      temperature: 0.3,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'image_url', image_url: { url: REAL_PNG, detail: 'high' } },
+        ],
+      }],
+    })
+
+    const out = await uploadChatImages(source, uploader, CREDENTIAL, stats)
+    const body = JSON.parse(out) as { temperature: number; messages: { content: unknown[] }[] }
+
+    expect(uploader.seen).toEqual([REAL_PNG])
+    expect(stats).toEqual({ externalized: 1, failed: 0 })
+    // 非图片字段原样保留（只是重新序列化，语义不变）。
+    expect(body.temperature).toBe(0.3)
+    expect(body.messages[0]?.content[1]).toEqual({
+      type: 'image_url',
+      image_url: { detail: 'high', url: 'https://ks3.test/up.png?sig=1' },
+    })
+  })
+
+  it('returns the original string untouched when there is nothing to upload', async () => {
+    const uploader = stubUploader()
+    const stats = emptyUploadStats()
+    const source = imageBody('https://example.com/already-a-url.png')
+
+    expect(await uploadChatImages(source, uploader, CREDENTIAL, stats)).toBe(source)
+    expect(uploader.seen).toEqual([])
+    expect(stats).toEqual({ externalized: 0, failed: 0 })
+  })
+
+  it('does not touch bodies without images (no parse, no re-serialize)', async () => {
+    const uploader = stubUploader()
+    const source = '{  "model" : "m" , "messages" : [] }'
+    expect(await uploadChatImages(source, uploader, CREDENTIAL)).toBe(source)
+    expect(uploader.seen).toEqual([])
+  })
+
+  it('uploads each distinct image once per request, and counts every part', async () => {
+    const uploader = stubUploader()
+    const stats = emptyUploadStats()
+    const source = JSON.stringify({
+      model: 'm',
+      messages: [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: REAL_PNG } }] },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: REAL_PNG } }] },
+      ],
+    })
+
+    await uploadChatImages(source, uploader, CREDENTIAL, stats)
+
+    expect(uploader.seen).toHaveLength(1)
+    expect(stats).toEqual({ externalized: 2, failed: 0 })
+  })
+
+  it('keeps base64 for the image whose upload failed, and still rewrites the others', async () => {
+    const ok = REAL_PNG
+    const other = `data:image/jpeg;base64,${Buffer.from([0xff, 0xd8, 0xff, 1, 2]).toString('base64')}`
+    const uploader: ComateAssetUploader = {
+      async upload(dataUrl: string) { return dataUrl === other ? undefined : 'https://ks3.test/ok.png' },
+    }
+    const stats = emptyUploadStats()
+    const source = JSON.stringify({
+      model: 'm',
+      messages: [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: ok } }] },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: other } }] },
+      ],
+    })
+
+    const out = await uploadChatImages(source, uploader, CREDENTIAL, stats)
+    const body = JSON.parse(out) as { messages: { content: { image_url: { url: string } }[] }[] }
+
+    expect(stats).toEqual({ externalized: 1, failed: 1 })
+    expect(body.messages[0]?.content[0]?.image_url.url).toBe('https://ks3.test/ok.png')
+    expect(body.messages[1]?.content[0]?.image_url.url).toBe(other)
+  })
+
+  it('is a no-op without an uploader or credential (feature off)', async () => {
+    const source = imageBody(REAL_PNG)
+    expect(await uploadChatImages(source, undefined, CREDENTIAL)).toBe(source)
+    expect(await uploadChatImages(source, stubUploader(), undefined)).toBe(source)
+  })
+
+  it('survives an unparsable body', async () => {
+    const source = 'not json data:image/png;base64,AAAA'
+    expect(await uploadChatImages(source, stubUploader(), CREDENTIAL)).toBe(source)
+  })
+
+  it('normalizes a bare-string image_url before uploading it', async () => {
+    // 未经归一化的形状（字符串拼法）：也应能外置，且升成对象形状。
+    const uploader = stubUploader('https://ks3.test/up.png')
+    const source = JSON.stringify({
+      model: 'm',
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: REAL_PNG }] }],
+    })
+
+    const out = await uploadChatImages(source, uploader, CREDENTIAL)
+    const body = JSON.parse(out) as { messages: { content: unknown[] }[] }
+    expect(body.messages[0]?.content[0]).toEqual({
+      type: 'image_url',
+      image_url: { url: 'https://ks3.test/up.png' },
+    })
   })
 })
