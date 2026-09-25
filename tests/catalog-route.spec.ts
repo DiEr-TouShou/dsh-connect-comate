@@ -5,10 +5,17 @@ import {
   COMATE_CATALOG_PATH,
   COMATE_CHECK_PATH,
   COMATE_REFRESH_PATH,
+  COMATE_SEAL_PATH,
   type ComateCheckOutcome,
   type ComatePersistedModel,
+  type ComateSealAnswer,
 } from '../src/bridge.ts'
-import { registerComateStatusRoute, type ComateCheckInput } from '../src/web-status.ts'
+import {
+  registerComateStatusRoute,
+  type ComateCatalogDeps,
+  type ComateCheckInput,
+  type ComateSealInput,
+} from '../src/web-status.ts'
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
 
@@ -34,15 +41,23 @@ interface HarnessOptions {
   /** Runs inside the injected refresh action, before the snapshot is taken. */
   onRefresh?: () => void
   check?: (input: ComateCheckInput) => Promise<ComateCheckOutcome>
+  seal?: (input: ComateSealInput) => Promise<ComateSealAnswer>
   modelsThrow?: boolean
   refreshThrow?: boolean
   checkThrow?: boolean
+  sealThrow?: boolean
+  /** The stored-sid verdict the status reader answers with; absent means the
+   *  deployment composes the routes without a credential store at all. */
+  sidState?: () => Promise<{ storage: 'unset' | 'plaintext' | 'sealed' | 'unreadable'; problem?: string }>
+  sidStateThrow?: boolean
 }
 
 interface Harness {
   registrations: Registration[]
   /** Every input the check action received, in order. */
   checkInputs: ComateCheckInput[]
+  /** Every input the seal action received, in order. */
+  sealInputs: ComateSealInput[]
   /** How many times the refresh action ran. */
   refreshCalls: number
   /** The live directory the status reader answers with; tests may replace it. */
@@ -79,6 +94,7 @@ function fakeRequest(
 function harness(options: HarnessOptions = {}): Harness {
   const registrations: Registration[] = []
   const checkInputs: ComateCheckInput[] = []
+  const sealInputs: ComateSealInput[] = []
   const directory = { current: options.models ?? MODELS }
   let refreshCalls = 0
   // The route registers its disposers on the INJECTED child fiber (the one that
@@ -106,16 +122,28 @@ function harness(options: HarnessOptions = {}): Harness {
     effect: (fn: () => unknown) => { fn(); return {} },
   }
 
+  // Built up in two steps rather than with a conditional spread, so the
+  // "no credential store" deployment is expressed by the field simply being
+  // absent instead of present-and-undefined.
+  const catalogDeps: ComateCatalogDeps = {
+    models: () => {
+      if (options.modelsThrow === true) throw new Error('discovery exploded')
+      return directory.current
+    },
+    signedIn: () => options.signedIn ?? true,
+    providerRegistered: () => options.providerRegistered ?? true,
+  }
+  if (options.sidState !== undefined) {
+    const sidState = options.sidState
+    catalogDeps.sidState = async () => {
+      if (options.sidStateThrow === true) throw new Error('key file exploded')
+      return await sidState()
+    }
+  }
+
   registerComateStatusRoute(
     ctx as unknown as Context,
-    {
-      models: () => {
-        if (options.modelsThrow === true) throw new Error('discovery exploded')
-        return directory.current
-      },
-      signedIn: () => options.signedIn ?? true,
-      providerRegistered: () => options.providerRegistered ?? true,
-    },
+    catalogDeps,
     {
       refresh: async () => {
         refreshCalls += 1
@@ -127,12 +155,20 @@ function harness(options: HarnessOptions = {}): Harness {
         if (options.checkThrow === true) throw new Error('check exploded')
         return options.check === undefined ? { ok: true, model: 'a' } : await options.check(input)
       },
+      seal: async (input) => {
+        sealInputs.push(input)
+        if (options.sealThrow === true) throw new Error('seal exploded')
+        return options.seal === undefined
+          ? { sealed: 'enc:v1:stub', length: 7 }
+          : await options.seal(input)
+      },
     },
   )
 
   return {
     registrations,
     checkInputs,
+    sealInputs,
     directory,
     get refreshCalls() { return refreshCalls },
     async request(path, method, headers = {}, body = '') {
@@ -156,10 +192,10 @@ function harness(options: HarnessOptions = {}): Harness {
  * the delegation to the injected actions each get their own assertions.
  */
 describe('registerComateStatusRoute', () => {
-  it('registers an exact route for each of the three paths', () => {
+  it('registers an exact route for each of the four paths', () => {
     const h = harness()
     expect(h.registrations.map(r => r.path).sort()).toEqual(
-      [COMATE_CATALOG_PATH, COMATE_CHECK_PATH, COMATE_REFRESH_PATH].sort(),
+      [COMATE_CATALOG_PATH, COMATE_CHECK_PATH, COMATE_REFRESH_PATH, COMATE_SEAL_PATH].sort(),
     )
     expect(h.registrations.every(r => r.kind === 'exact')).toBe(true)
   })
@@ -196,6 +232,69 @@ describe('registerComateStatusRoute', () => {
       const answer = await h.request(COMATE_CATALOG_PATH, 'GET', { host: '127.0.0.1:3080' })
       expect(answer.status).toBe(500)
       expect(JSON.stringify(answer.body)).not.toContain('discovery exploded')
+    })
+
+    /**
+     * The stored-sid verdict rides along with the catalog because the browser
+     * cannot compute it: a sealed value whose key file is gone is byte-identical
+     * to a healthy one. Without this the card would paint a green 「已加密保存」 for
+     * a credential that no longer works, and the user's first clue would be an
+     * unexplained 401 from the upstream.
+     */
+    describe('stored-sid verdict', () => {
+      it('reports the host verdict together with its reason', async () => {
+        const h = harness({
+          sidState: async () => ({ storage: 'unreadable', problem: 'key-file-missing' }),
+        })
+        const answer = await h.request(COMATE_CATALOG_PATH, 'GET', { host: '127.0.0.1:3080' })
+        expect(answer.status).toBe(200)
+        expect(answer.body).toEqual({
+          signedIn: true,
+          providerRegistered: true,
+          models: MODELS,
+          sidStorage: 'unreadable',
+          sidProblem: 'key-file-missing',
+        })
+      })
+
+      it('leaves the reason out when the verdict has none', async () => {
+        const h = harness({ sidState: async () => ({ storage: 'sealed' }) })
+        const answer = await h.request(COMATE_CATALOG_PATH, 'GET', { host: '127.0.0.1:3080' })
+        expect(answer.body).toEqual({
+          signedIn: true,
+          providerRegistered: true,
+          models: MODELS,
+          sidStorage: 'sealed',
+        })
+        // Absent, not present-and-undefined: the card reads the field's absence
+        // as "no verdict" and falls back to the stored string's shape.
+        expect(Object.keys(answer.body as object)).not.toContain('sidProblem')
+      })
+
+      it('omits both fields when the deployment has no credential store', async () => {
+        const h = harness()
+        const answer = await h.request(COMATE_CATALOG_PATH, 'GET', { host: '127.0.0.1:3080' })
+        expect(Object.keys(answer.body as object)).not.toContain('sidStorage')
+      })
+
+      it('still answers the catalog when the sid probe fails', async () => {
+        // A verdict that cannot be computed is "unknown", never a broken catalog:
+        // the model directory is true either way, and the card's fallback covers
+        // the gap.
+        const h = harness({ sidState: async () => ({ storage: 'sealed' }), sidStateThrow: true })
+        const answer = await h.request(COMATE_CATALOG_PATH, 'GET', { host: '127.0.0.1:3080' })
+        expect(answer.status).toBe(200)
+        expect(answer.body).toEqual({ signedIn: true, providerRegistered: true, models: MODELS })
+      })
+
+      it('carries the verdict on the refresh answer too', async () => {
+        // Both handlers share one snapshot builder; this pins that the refresh
+        // route did not keep a private copy.
+        const h = harness({ sidState: async () => ({ storage: 'plaintext' }) })
+        const answer = await h.request(COMATE_REFRESH_PATH, 'POST', JSON_HEADERS)
+        expect(answer.status).toBe(200)
+        expect(answer.body).toMatchObject({ sidStorage: 'plaintext' })
+      })
     })
   })
 
@@ -301,6 +400,84 @@ describe('registerComateStatusRoute', () => {
     })
   })
 
+  describe('POST __seal', () => {
+    it('seals a typed sid and answers the ciphertext', async () => {
+      const h = harness()
+      const answer = await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ sid: 'a-b_c.d' }))
+      expect(answer.status).toBe(200)
+      expect(answer.body).toEqual({ sealed: 'enc:v1:stub', length: 7 })
+      // The plaintext reaches the host action and comes back as ciphertext: the
+      // answer itself carries nothing that could be replayed as a credential.
+      expect(h.sealInputs).toEqual([{ sid: 'a-b_c.d' }])
+      expect(JSON.stringify(answer.body)).not.toContain('a-b_c.d')
+    })
+
+    it('seals the stored value for the plaintext-upgrade path', async () => {
+      // The upgrade must not round-trip the plaintext through the browser just to
+      // re-save it, so the host is asked to seal what it already holds.
+      const h = harness()
+      const answer = await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ fromStored: true }))
+      expect(answer.status).toBe(200)
+      expect(h.sealInputs).toEqual([{ fromStored: true }])
+    })
+
+    it('rejects a body that carries neither shape', async () => {
+      const h = harness()
+      expect((await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS)).status).toBe(400)
+      // A blank string is not a sid: the action refuses an empty secret anyway,
+      // and answering 400 here says what the body should look like instead of
+      // turning a client bug into an opaque 500.
+      expect((await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ sid: '   ' }))).status).toBe(400)
+      expect((await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ fromStored: 'yes' }))).status).toBe(400)
+      expect(h.sealInputs).toEqual([])
+    })
+
+    it('rejects a malformed JSON body with 400, not 500', async () => {
+      const h = harness()
+      const answer = await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, '{not json')
+      expect(answer.status).toBe(400)
+      expect(h.sealInputs).toEqual([])
+    })
+
+    it('rejects GET', async () => {
+      const h = harness()
+      expect((await h.request(COMATE_SEAL_PATH, 'GET', { host: '127.0.0.1:3080' })).status).toBe(405)
+      expect(h.sealInputs).toEqual([])
+    })
+
+    it('reports a failed seal as 500 rather than storing the plaintext', async () => {
+      // The one route whose failure must be VISIBLE: a silent fallback would put
+      // the credential into the settings document in the clear.
+      const h = harness({
+        seal: async () => {
+          throw new Error('comate: cannot seal the secret: the key file is key-missing (C:/k)')
+        },
+      })
+      const answer = await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ sid: 'draft-sid' }))
+      expect(answer.status).toBe(500)
+      // The reason does travel — the card shows it, and "cannot seal" is what
+      // aborts the save. What must not travel is the credential itself.
+      expect(answer.body).toEqual({ error: 'comate: cannot seal the secret: the key file is key-missing (C:/k)' })
+      expect(JSON.stringify(answer.body)).not.toContain('draft-sid')
+    })
+
+    it('redacts anything token-like out of a failed seal message', async () => {
+      // A seal message can quote an upstream error body, so it goes through the
+      // same redaction the probe's excerpts do.
+      const h = harness({
+        seal: async () => {
+          throw new Error('rejected wps_sid=V02SWTsCsecret and eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig')
+        },
+      })
+      const answer = await h.request(COMATE_SEAL_PATH, 'POST', JSON_HEADERS, JSON.stringify({ sid: 'draft-sid' }))
+      expect(answer.status).toBe(500)
+      const serialized = JSON.stringify(answer.body)
+      expect(serialized).toContain('wps_sid=[redacted]')
+      expect(serialized).toContain('[redacted token]')
+      expect(serialized).not.toContain('V02SWTsCsecret')
+    })
+  })
+
   describe('inbound gates and teardown', () => {
     it('rejects a cross-site browser fetch on every route', async () => {
       const h = harness()
@@ -354,9 +531,9 @@ describe('registerComateStatusRoute', () => {
       registerComateStatusRoute(
         ctx as unknown as Context,
         { models: () => [], signedIn: () => false, providerRegistered: () => false },
-        { refresh: async () => {}, check: async () => ({ ok: false }) },
+        { refresh: async () => {}, check: async () => ({ ok: false }), seal: async () => ({ sealed: 'enc:v1:stub', length: 1 }) },
       )
-      expect(effects).toHaveLength(3)
+      expect(effects).toHaveLength(4)
     })
 
     it('registers through ctx.inject rather than ctx.get', () => {
@@ -377,7 +554,7 @@ describe('registerComateStatusRoute', () => {
       registerComateStatusRoute(
         ctx as unknown as Context,
         { models: () => [], signedIn: () => false, providerRegistered: () => false },
-        { refresh: async () => {}, check: async () => ({ ok: false }) },
+        { refresh: async () => {}, check: async () => ({ ok: false }), seal: async () => ({ sealed: 'enc:v1:stub', length: 1 }) },
       )
       expect(inject).toHaveBeenCalledWith(['webServer'])
     })

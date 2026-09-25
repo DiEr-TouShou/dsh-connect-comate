@@ -17,7 +17,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { COMATE_CATALOG_PATH, COMATE_DEFAULT_MAX_TOKENS, type ComateCheckOutcome, type ComatePersistedModel } from '../bridge.ts'
+import {
+  COMATE_CATALOG_PATH,
+  COMATE_DEFAULT_MAX_TOKENS,
+  isSealedComateSecret,
+  type ComateCheckOutcome,
+  type ComatePersistedModel,
+  type ComateSidStorage,
+} from '../bridge.ts'
 import { parseMaxOutputTokens } from '../max-tokens.ts'
 import { COMATE_PLUGIN_ICON } from './icon.ts'
 import { COMATE_CARD_CSS } from './styles.ts'
@@ -26,6 +33,8 @@ import {
   comateSettingsWritable,
   readComateValue,
   refreshComateCatalog,
+  sealComateSid,
+  sealStoredComateSid,
   testComateConnection,
   writeComateSettings,
   type ComateSettingsForm,
@@ -100,6 +109,32 @@ function Note({ note }: { note: CardNote }) {
   return <p className={className}>{note.text}</p>
 }
 
+/**
+ * Refuse every clipboard route out of the sid field.
+ *
+ * `type="password"` only controls how the value is PAINTED. Chrome happens to
+ * block script-driven copies from a password field, but that is a browser
+ * behaviour rather than a contract, and the user asked for the field not to be
+ * copyable at all — so copy, cut, drag and the context menu are cancelled here
+ * instead of being relied upon. Pasting is untouched: the whole point of the
+ * field is that a value goes in.
+ */
+function blockClipboard(event: { preventDefault(): void }): void {
+  event.preventDefault()
+}
+
+/** One message from an unknown thrown value. */
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+/** Narrow the host's `sidStorage` field; anything else means "no verdict". */
+function toSidStorage(value: unknown): ComateSidStorage | undefined {
+  return value === 'unset' || value === 'plaintext' || value === 'sealed' || value === 'unreadable'
+    ? value
+    : undefined
+}
+
 /** Narrow one entry of the catalog route's answer. */
 function isPersistedModel(value: unknown): value is ComatePersistedModel {
   if (value === null || typeof value !== 'object') return false
@@ -119,6 +154,14 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const [revision, setRevision] = useState(0)
   const saved = useMemo(() => readComateValue(settingsScope), [settingsScope, revision])
   const savedSid = saved.wpsSid ?? ''
+  // What the stored string LOOKS like, which is all the browser can know by
+  // itself: the sealed envelope is a prefix, and anything without it is a value
+  // an older version wrote in the clear. `unreadable` is deliberately not in this
+  // set — a sealed value whose key file is gone is byte-identical to a healthy
+  // one, so only the host can tell those two apart (see `hostSid` below).
+  const sidShape: 'unset' | 'plaintext' | 'sealed' = savedSid === ''
+    ? 'unset'
+    : isSealedComateSecret(savedSid) ? 'sealed' : 'plaintext'
   const savedCookieOnly = saved.cookieOnly === true
   const savedConfigFile = saved.configFile ?? ''
   // An unset cap means the plugin default is in force; the input shows that
@@ -151,7 +194,22 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const [refreshNote, setRefreshNote] = useState<CardNote | undefined>(undefined)
   const [testing, setTesting] = useState(false)
   const [testNote, setTestNote] = useState<CardNote | undefined>(undefined)
+  const [migrating, setMigrating] = useState(false)
+  const [sidNote, setSidNote] = useState<CardNote | undefined>(undefined)
+  // The host's own verdict on the stored sid, which is the only way to learn
+  // that a sealed value cannot be opened on this machine. Absent until the
+  // catalog route answers — and absent forever in a deployment without one, in
+  // which case the shape heuristic stands in and nothing is claimed beyond it.
+  const [hostSid, setHostSid] = useState<{ storage: ComateSidStorage; problem?: string } | undefined>(undefined)
+  // The host wins when it has spoken; otherwise the stored string's shape. A
+  // plaintext value is never mis-reported as sealed by either source, which is
+  // the one direction that would hide a credential left in the clear.
+  const sidStorage: ComateSidStorage = hostSid?.storage ?? sidShape
   const mounted = useRef(true)
+  // One automatic upgrade attempt per mount: a failure is reported and the user
+  // gets an explicit 「立即加密」 button, rather than the card retrying a host call
+  // on every render while a save is in flight.
+  const migrateStarted = useRef(false)
 
   useEffect(() => {
     mounted.current = true
@@ -177,11 +235,20 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         credentials: 'same-origin',
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const body = await response.json() as { models?: unknown }
+      const body = await response.json() as { models?: unknown; sidStorage?: unknown; sidProblem?: unknown }
       const models = Array.isArray(body.models) ? body.models.filter(isPersistedModel) : []
       if (!mounted.current) return
       setCatalog(models)
       setCatalogFailed(false)
+      // The verdict is kept separate from the model list: an unknown or missing
+      // field leaves the previous one in place rather than downgrading a known
+      // state to a guess.
+      const storage = toSidStorage(body.sidStorage)
+      if (storage !== undefined) {
+        setHostSid(typeof body.sidProblem === 'string' && body.sidProblem !== ''
+          ? { storage, problem: body.sidProblem }
+          : { storage })
+      }
     } catch {
       if (!mounted.current) return
       setCatalog([])
@@ -328,6 +395,45 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     || maxTokensDirty
     || !sameSet(draftEnabled, savedEnabledIds)
 
+  /**
+   * Upgrade a plaintext stored sid to encrypted storage.
+   *
+   * The plaintext never enters the browser: the host seals the value it already
+   * holds (`fromStored`) and only the ciphertext comes back, which the card then
+   * writes through the ordinary settings path.
+   *
+   * This runs once automatically when the card opens on a plaintext value — the
+   * point of the change is that no plaintext credential stays behind, and a user
+   * who never opens the card would otherwise keep one forever. A failure is
+   * reported rather than retried in a loop; the button beside the status line
+   * retries on demand.
+   */
+  const migratePlaintext = useCallback(async (): Promise<void> => {
+    if (settingsScope === undefined) return
+    setMigrating(true)
+    setSidNote(undefined)
+    try {
+      const answer = await sealStoredComateSid()
+      await writeComateSettings(settingsScope, { wpsSid: answer.sealed })
+      if (!mounted.current) return
+      setSidNote({ tone: 'ok', text: t('row.sidMigrated', { length: answer.length }) })
+    } catch (cause: unknown) {
+      if (!mounted.current) return
+      setSidNote({ tone: 'error', text: t('row.sidMigrateFailed', { message: messageOf(cause) }) })
+    } finally {
+      if (mounted.current) setMigrating(false)
+    }
+  }, [settingsScope, t])
+
+  useEffect(() => {
+    // Skipped while the user is mid-edit: a typed replacement (or a staged clear)
+    // wins, and saving it seals it anyway.
+    if (sidStorage !== 'plaintext' || !writable || saving || migrating) return
+    if (draftSid !== null || clearPending || migrateStarted.current) return
+    migrateStarted.current = true
+    void migratePlaintext()
+  }, [sidStorage, writable, saving, migrating, draftSid, clearPending, migratePlaintext])
+
   const toggleModel = (id: string): void => {
     setDraftEnabled(current => {
       const next = new Set(current)
@@ -343,6 +449,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     setDraftEnabled(new Set(savedEnabledIds))
     setDraftMaxTokens(String(savedMaxTokens))
     setError(undefined)
+    setSidNote(undefined)
   }
 
   const formatContext = (value: number): string => {
@@ -355,7 +462,24 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     if (settingsScope === undefined || saving) return
     setSaving(true)
     setError(undefined)
+    setSidNote(undefined)
     try {
+      // A typed sid is sealed BEFORE anything is written: the settings document
+      // must never receive a plaintext credential. A failed seal aborts the whole
+      // save rather than writing the other fields — a save that "succeeded" while
+      // the sid silently stayed behind is worse than a visible failure.
+      let sealedSid: string | undefined
+      let sealedLength: number | undefined
+      if (sidReplace) {
+        try {
+          const answer = await sealComateSid(trimmedSid)
+          sealedSid = answer.sealed
+          sealedLength = answer.length
+        } catch (cause: unknown) {
+          if (mounted.current) setError(t('row.sidSealFailed', { message: messageOf(cause) }))
+          return
+        }
+      }
       // All-selected normalizes to an empty list, which the host reads as
       // "show every discovered model" and keeps the saved section compact.
       const allSelected = catalogIds.every(id => draftEnabled.has(id))
@@ -367,9 +491,9 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         : (allSelected ? [] : catalogIds.filter(id => draftEnabled.has(id)))
       await writeComateSettings(settingsScope, {
         // Only an explicit intent writes the sid: a staged clear sends '',
-        // a typed replacement sends the new value, an empty draft omits the
+        // a typed replacement sends its SEALED form, an empty draft omits the
         // field entirely so the stored value survives untouched.
-        ...(clearPending ? { wpsSid: '' } : sidReplace ? { wpsSid: trimmedSid } : {}),
+        ...(clearPending ? { wpsSid: '' } : sidReplace ? { wpsSid: sealedSid } : {}),
         cookieOnly: draftCookieOnly,
         enabledModelIds,
         // Only a usable draft is written: an invalid box keeps Save disabled, so
@@ -381,6 +505,18 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
       setDraftSid(null)
       setClearPending(false)
       setSavedFlash(true)
+      // Record the verdict this save just established, rather than waiting for
+      // the next catalog read: the host sealed this very value, so the key file
+      // demonstrably works on this machine, and a staged clear leaves nothing to
+      // open. Without this the status line would keep showing the state from
+      // before the save until the card is reopened.
+      if (clearPending) setHostSid({ storage: 'unset' })
+      else if (sealedSid !== undefined) setHostSid({ storage: 'sealed' })
+      // The plaintext length is the one property of the credential this UI ever
+      // showed, and after sealing it can no longer be read off the stored value.
+      if (sealedLength !== undefined) {
+        setSidNote({ tone: 'ok', text: t('row.sidSavedSealed', { length: sealedLength }) })
+      }
       window.setTimeout(() => { if (mounted.current) setSavedFlash(false) }, 4000)
     } catch (cause: unknown) {
       if (mounted.current) {
@@ -392,7 +528,24 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   }
 
   const title = t('row.title')
-  const sidConfigured = savedSid.length > 0
+  const sidConfigured = sidStorage !== 'unset'
+  // "Leave empty to keep the current value" is only true when the stored value is
+  // one this machine can still use or upgrade. For an unreadable one the honest
+  // prompt is to paste again, so it gets the plain placeholder.
+  const sidKeepsStored = sidStorage === 'sealed' || sidStorage === 'plaintext'
+  // `unreadable` is a WARNING, not a configured state the user can rely on: the
+  // credential is present but unusable on this machine, and the failure would
+  // otherwise surface much later as an unexplained 401 from the upstream.
+  const sidStatusText = sidStorage === 'sealed'
+    ? t('row.sidSet')
+    : sidStorage === 'plaintext'
+      ? t('row.sidSetPlain')
+      : sidStorage === 'unreadable'
+        ? t('row.sidUnreadable')
+        : t('row.sidUnset')
+  const sidStatusTone = sidStorage === 'sealed'
+    ? 'ok'
+    : sidStorage === 'unset' ? 'empty' : 'warn'
 
   return (
     <li className={`dsm-plugin-card${open ? ' dsm-plugin-card-open' : ''}`}>
@@ -419,28 +572,71 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
               <div className="dsm-comate-status">
                 <span
                   aria-hidden="true"
-                  className={`dsm-comate-status-dot ${sidConfigured ? 'dsm-comate-status-ok' : 'dsm-comate-status-empty'}`}
+                  className={`dsm-comate-status-dot ${sidStatusTone === 'ok' ? 'dsm-comate-status-ok' : 'dsm-comate-status-empty'}`}
                 />
-                <span>{sidConfigured
-                  ? t('row.sidSet', { length: savedSid.length })
-                  : t('row.sidUnset')}</span>
+                <span className={sidStatusTone === 'warn' ? 'dsm-comate-status-warn' : undefined}>
+                  {sidStatusText}
+                </span>
+                {/* The reason comes from the host and is never invented here: an
+                    empty box beside the warning would be worse than the warning
+                    alone. */}
+                {sidStorage === 'unreadable' && hostSid?.problem !== undefined
+                  ? (
+                      <span className="dsm-comate-status-warn">
+                        {t('row.sidUnreadableWhy', { reason: hostSid.problem })}
+                      </span>
+                    )
+                  : null}
+                {/* The retry path for a failed automatic upgrade. Shown only while
+                    a plaintext value is still stored, so the state is never a
+                    dead end the user cannot act on. */}
+                {sidStorage === 'plaintext' && writable
+                  ? (
+                      <button
+                        type="button"
+                        className="dsm-btn dsm-btn-outline"
+                        disabled={saving || migrating}
+                        onClick={() => {
+                          migrateStarted.current = true
+                          void migratePlaintext()
+                        }}
+                      >
+                        {migrating ? t('row.sidMigrating') : t('row.sidMigrate')}
+                      </button>
+                    )
+                  : null}
               </div>
               <div className="dsm-comate-field">
                 <label className="dsm-comate-label" htmlFor="dsh-comate-wps-sid">{t('row.sidLabel')}</label>
                 <div className="dsm-comate-sid-row">
                   <input
                     id="dsh-comate-wps-sid"
-                    className="dsm-comate-input"
-                    type="text"
+                    className="dsm-comate-input dsm-comate-input-secret"
+                    // Password type: the value is painted as dots and never as
+                    // text — not even while focused, and with no reveal toggle.
+                    type="password"
+                    // `new-password` (rather than `off`) is what actually stops
+                    // the browser's password manager from offering to save it,
+                    // and stops autofill from painting a stored credential into
+                    // a field the user may then mistake for the current one.
                     autoComplete="new-password"
+                    autoCapitalize="off"
+                    autoCorrect="off"
                     spellCheck={false}
+                    aria-describedby="dsh-comate-wps-sid-hint"
+                    // The browser lets a password field be copied even though it
+                    // cannot be read; these four events close that door.
+                    onCopy={blockClipboard}
+                    onCut={blockClipboard}
+                    onDragStart={blockClipboard}
+                    onContextMenu={blockClipboard}
                     placeholder={clearPending
                       ? t('row.sidClearPending')
-                      : sidConfigured
+                      : sidKeepsStored
                         ? t('row.sidPlaceholderSet')
                         : t('row.sidPlaceholder')}
                     value={draftSid ?? ''}
-                    disabled={!writable || saving || clearPending}
+                    disabled={!writable || saving || clearPending || migrating}
                     onChange={event => { setDraftSid(event.currentTarget.value) }}
                   />
                   {/* Clearing is a staged intent like any other edit: it goes
@@ -459,7 +655,8 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                       )
                     : null}
                 </div>
-                <p className="dsm-comate-hint">{t('row.sidHint')}</p>
+                <p className="dsm-comate-hint" id="dsh-comate-wps-sid-hint">{t('row.sidHint')}</p>
+                {sidNote === undefined ? null : <Note note={sidNote} />}
               </div>
               <label className="dsm-comate-check">
                 <input

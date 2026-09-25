@@ -23,10 +23,12 @@ import {
   COMATE_CHECK_PATH,
   COMATE_ENTRY_ID,
   COMATE_REFRESH_PATH,
+  COMATE_SEAL_PATH,
   COMATE_SETTINGS_NS,
   unwrapVolatile,
   type ComateCatalogAnswer,
   type ComateCheckOutcome,
+  type ComateSealAnswer,
   type ComateSettingsValue,
 } from '../bridge.ts'
 
@@ -114,10 +116,12 @@ export class ComateSettingsWriteError extends Error {
 /** The fields the card may save; an omitted field keeps its stored value. */
 export interface ComateSettingsPatch {
   /**
-   * The card never re-sends the stored sid: omitted keeps it, an explicit
-   * empty string clears it.
+   * The **sealed** value to store (see {@link sealComateSid}) — the card never
+   * writes a plaintext sid, and the host never expects one. The card also never
+   * re-sends the stored value: omitted keeps it, an explicit empty string clears
+   * it.
    */
-  wpsSid?: string
+  wpsSid?: string | undefined
   cookieOnly?: boolean
   enabledModelIds?: readonly string[]
   /** Output-token cap: positive integer, or 0 for "no cap". */
@@ -366,4 +370,36 @@ export async function testComateConnection(
   input: { wpsSid?: string; cookieOnly?: boolean } = {},
 ): Promise<ComateCheckOutcome> {
   return postAction<ComateCheckOutcome>(COMATE_CHECK_PATH, input)
+}
+
+/**
+ * Encrypt a plaintext sid into the value that belongs in the settings document.
+ *
+ * The key is host-side by design (a key file plus this machine's fingerprint), so
+ * the browser cannot seal anything itself — and should not be able to. The
+ * plaintext travels over the same loopback path the connection probe already
+ * uses, and only the ciphertext comes back.
+ *
+ * Unlike the probe, this REJECTS when it fails: the caller must abort the save,
+ * because the only alternative would be writing the plaintext, which is exactly
+ * what this route exists to prevent.
+ *
+ * @param sid - the plaintext value as typed.
+ * @returns the sealed string plus the plaintext length, for the card's copy.
+ */
+export async function sealComateSid(sid: string): Promise<ComateSealAnswer> {
+  return postAction<ComateSealAnswer>(COMATE_SEAL_PATH, { sid })
+}
+
+/**
+ * Seal the value the settings document already stores.
+ *
+ * The plaintext-upgrade path: the host seals what it already holds, so a
+ * credential saved by an older version never has to enter the browser just to be
+ * re-saved in encrypted form.
+ *
+ * @returns the sealed string plus the plaintext length.
+ */
+export async function sealStoredComateSid(): Promise<ComateSealAnswer> {
+  return postAction<ComateSealAnswer>(COMATE_SEAL_PATH, { fromStored: true })
 }

@@ -1,6 +1,6 @@
 /**
- * Host routes the browser card talks to: one read-only status route and two
- * actions (refresh the model directory, test the connection).
+ * Host routes the browser card talks to: one read-only status route and three
+ * actions (refresh the model directory, test the connection, seal a sid).
  *
  * 参考：dingminhua/dsh-connect-workbuddy（MIT，Copyright (c) 2026 LaoDing）
  *   — 「宿主状态经 `ctx.inject(['webServer'], …)` 暴露成路由、Host 与 Origin
@@ -8,6 +8,9 @@
  *   设计并验证。
  * 改动：本插件只暴露**只读**路由。`__refresh` 只重读本机 config 并刷新内存快照，
  *   `__check` 只发一次最小请求；两者都不写任何文件，也不回传任何凭据。
+ *   v0.4 新增 `__seal`：唯一一条会产出**新数据**的路由，产出的也只是密文——明文
+ *   进、密文出，密钥从不离开宿主。它写文件（首次会生成密钥文件），但不碰任何
+ *   Comate 或 DSH 的设置文档。
  *
  * ## 为什么目录不走 settings
  *
@@ -26,10 +29,14 @@ import {
   COMATE_CATALOG_PATH,
   COMATE_CHECK_PATH,
   COMATE_REFRESH_PATH,
+  COMATE_SEAL_PATH,
   type ComateCatalogAnswer,
   type ComatePersistedModel,
+  type ComateSealAnswer,
+  type ComateSidStorage,
 } from './bridge.ts'
 import type { ComateCheckOutcome } from './check.ts'
+import { safeMessage } from './check.ts'
 import { hostIsLoopback, isJsonContentType, originIsLoopback } from './shim.ts'
 
 /**
@@ -57,6 +64,20 @@ export interface ComateCatalogDeps {
    * something the user (and `curl`) can see.
    */
   providerRegistered: () => boolean
+  /**
+   * Storage state of the saved `wps_sid`.
+   *
+   * Exists because `unreadable` is not derivable in the browser: a sealed
+   * envelope whose key file is gone looks exactly like a healthy one, so without
+   * this the card would report a green 「已加密保存」 for a credential that can no
+   * longer be used — and the user's first clue would be an unexplained 401.
+   *
+   * Optional: a deployment that composes these routes without a credential store
+   * simply omits it, and the card falls back to the stored string's prefix.
+   * MUST NOT reject — a probe that fails is reported as "unknown", never as a
+   * broken catalog.
+   */
+  sidState?: () => Promise<{ storage: ComateSidStorage; problem?: string }>
 }
 
 /** Input of one connection probe; every field is an optional draft override. */
@@ -67,6 +88,21 @@ export interface ComateCheckInput {
   cookieOnly?: boolean
   /** Model to probe; absent uses the card's default pick. */
   model?: string
+}
+
+/**
+ * Input of one seal request.
+ *
+ * Two shapes, one route. `sid` is the ordinary "I just typed a value" path;
+ * `fromStored` is the plaintext-upgrade path, where the host seals the value it
+ * already holds — that way the plaintext of a credential saved by an older
+ * version never has to travel through the browser just to be re-saved.
+ */
+export interface ComateSealInput {
+  /** Plaintext sid to seal. Blank/absent means "not this shape". */
+  sid?: string
+  /** Seal whatever the settings document already stores. */
+  fromStored?: boolean
 }
 
 /**
@@ -85,6 +121,15 @@ export interface ComateActionDeps {
   refresh: () => Promise<void>
   /** Probe the connection with the given (possibly draft) inputs. */
   check: (input: ComateCheckInput) => Promise<ComateCheckOutcome>
+  /**
+   * Seal a plaintext sid (or the stored one) into its storable form.
+   *
+   * MAY reject: unlike a probe, a failed seal is not an answer the card renders
+   * as data — the save must be aborted, because the alternative is writing the
+   * plaintext into the settings document, which is the thing this route exists
+   * to prevent. The rejection message is shown to the user.
+   */
+  seal: (input: ComateSealInput) => Promise<ComateSealAnswer>
 }
 
 /** Write one JSON response with an explicit length so the socket can be reused. */
@@ -146,6 +191,19 @@ function toCheckInput(body: unknown): ComateCheckInput {
   return input
 }
 
+/** Narrow an untrusted body to the seal request's two shapes. */
+function toSealInput(body: unknown): ComateSealInput {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return {}
+  const raw = body as Record<string, unknown>
+  const input: ComateSealInput = {}
+  // A blank string is NOT a sid: `store.seal` refuses an empty secret anyway, and
+  // treating `""` as "present" would turn a client bug into a confusing 500
+  // instead of the 400 that says what the body must look like.
+  if (typeof raw['sid'] === 'string' && raw['sid'].trim() !== '') input.sid = raw['sid']
+  if (raw['fromStored'] === true) input.fromStored = true
+  return input
+}
+
 /**
  * Register the status and action routes for as long as the composing deployment
  * provides a web server.
@@ -159,7 +217,7 @@ function toCheckInput(body: unknown): ComateCheckInput {
  *
  * @param ctx - the plugin's context.
  * @param deps - live readers over the host's discovery state.
- * @param actions - the two actions the card can trigger.
+ * @param actions - the three actions the card can trigger.
  */
 export function registerComateStatusRoute(
   ctx: Context,
@@ -168,24 +226,38 @@ export function registerComateStatusRoute(
 ): void {
   ctx.inject(['webServer'], (webCtx) => {
     /** The current status answer, shared by the GET and the refresh route. */
-    const snapshot = (): ComateCatalogAnswer => ({
-      signedIn: deps.signedIn(),
-      providerRegistered: deps.providerRegistered(),
-      models: [...deps.models()],
-    })
+    const snapshot = async (): Promise<ComateCatalogAnswer> => {
+      const answer: ComateCatalogAnswer = {
+        signedIn: deps.signedIn(),
+        providerRegistered: deps.providerRegistered(),
+        models: [...deps.models()],
+      }
+      if (deps.sidState === undefined) return answer
+      try {
+        const state = await deps.sidState()
+        // An optional field assigned `undefined` would be dropped by
+        // JSON.stringify anyway; branching keeps the document clean without an
+        // `undefined` that `exactOptionalPropertyTypes` would refuse.
+        if (state.problem === undefined) return { ...answer, sidStorage: state.storage }
+        return { ...answer, sidStorage: state.storage, sidProblem: state.problem }
+      } catch {
+        // Unknown, not broken: the catalog is still true and still useful.
+        return answer
+      }
+    }
 
     const routes: Array<{ path: string; method: 'GET' | 'POST'; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }> = [
       {
         path: COMATE_CATALOG_PATH,
         method: 'GET',
-        handler: (req, res) => {
+        handler: async (req, res) => {
           const denied = refuse(req, 'GET')
           if (denied !== undefined) {
             json(res, denied.status, { error: denied.error })
             return
           }
           try {
-            json(res, 200, snapshot())
+            json(res, 200, await snapshot())
           } catch {
             // Discovery is in-memory bookkeeping, but a throwing reader must not
             // take the whole web server down; answer a plain failure instead.
@@ -207,7 +279,7 @@ export function registerComateStatusRoute(
             // has been read can reset the connection under some clients.
             await readJsonBody(req)
             await actions.refresh()
-            json(res, 200, snapshot())
+            json(res, 200, await snapshot())
           } catch {
             json(res, 500, { error: 'refresh failed' })
           }
@@ -235,6 +307,38 @@ export function registerComateStatusRoute(
             json(res, 200, await actions.check(input))
           } catch {
             json(res, 500, { error: 'check failed' })
+          }
+        },
+      },
+      {
+        path: COMATE_SEAL_PATH,
+        method: 'POST',
+        handler: async (req, res) => {
+          const denied = refuse(req, 'POST')
+          if (denied !== undefined) {
+            json(res, denied.status, { error: denied.error })
+            return
+          }
+          let input: ComateSealInput
+          try {
+            input = toSealInput(await readJsonBody(req))
+          } catch {
+            json(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          if (input.sid === undefined && input.fromStored !== true) {
+            json(res, 400, { error: 'expected a non-empty "sid", or "fromStored": true' })
+            return
+          }
+          try {
+            json(res, 200, await actions.seal(input))
+          } catch (error: unknown) {
+            // A failed seal is not an answer the card renders as data: the save
+            // must abort rather than fall back to storing the plaintext. The
+            // message is shown to the user, so it goes through the same redaction
+            // the probe's excerpts do — a key-file path is fine to name, a
+            // credential never is.
+            json(res, 500, { error: safeMessage(error) })
           }
         },
       },

@@ -16,12 +16,36 @@
  * 同构副本在 `~/.wpscomate/agent/models.json`。
  * 本模块只读这些文件，从不写入；token 不进入 DSH 设置。
  *
+ * ## 手动 wps_sid 的存储（v0.4 起为密文）
+ *
+ * 桌面端 config 里的 apiKey/cookie 只是占位，真正的会话 Cookie 由 Comate UI 每次
+ * 任务下发，所以 llmproxy 需要一个手工填的 `wps_sid`。它存在 DSH 的设置文档里
+ * （0.1.7 上就是用户手写的 `cordis.patch.yml`）——**v0.4 起存的是密文**
+ * （`enc:v1:…`，见 `./secret.ts`），本模块负责在读路径上把它解开。
+ *
+ * 兼容性：没有该前缀的值一律按**明文**读（0.4 之前写进去的、以及 `WPS_COMATE_SID`
+ * 这种用户自己给的值），所以升级不会把手上的凭据弄丢；卡片会在打开时把它升级成
+ * 密文。解不开的密文（密钥文件丢了、或密文来自另一台机器/另一个用户）不会抛错，
+ * 而是被当作「没有可用凭据」上报，并带上原因——静默 401 是这里最坏的失败形态。
+ *
  * @module dsh-connect-comate/auth
  */
 
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isSealedComateSecret, type ComateSealAnswer } from './bridge.ts'
+import {
+  COMATE_SECRET_DIRNAME,
+  COMATE_SECRET_KEY_ENV,
+  COMATE_SECRET_KEY_FILENAME,
+  openSecret,
+  sealSecret,
+  type ComateOpenFailure,
+} from './secret.ts'
+
+/** Re-exported so the CLI can report where the key file lives without importing `secret.ts`. */
+export { COMATE_SECRET_KEY_ENV } from './secret.ts'
 
 /** Env var overriding the exact Comate config file path. */
 export const COMATE_CONFIG_ENV = 'WPS_COMATE_CONFIG_FILE'
@@ -29,7 +53,13 @@ export const COMATE_CONFIG_ENV = 'WPS_COMATE_CONFIG_FILE'
 /** Env var overriding the Comate home directory (default `~/.wpscomate`). */
 export const COMATE_HOME_ENV = 'WPS_COMATE_HOME'
 
-/** Env var providing the WPS login cookie (wps_sid) for manual auth mode. */
+/**
+ * Env var providing the WPS login cookie (wps_sid) for manual auth mode.
+ *
+ * A **sealed** value is accepted here too: the read path is shared with the
+ * settings field, so `WPS_COMATE_SID=enc:v1:…` works and is the only way a
+ * headless run can use an encrypted credential.
+ */
 export const COMATE_SID_ENV = 'WPS_COMATE_SID'
 
 export const COMATE_HOME_DIRNAME = '.wpscomate'
@@ -116,7 +146,43 @@ export interface ComateDoctorReport {
   signIn: ComateAuthStatus['state']
   /** Whether a manual wps_sid (config or env) will be used. */
   wpsSid: 'set' | 'unset'
+  /** How that sid is protected at rest; `unset` when there is none. */
+  wpsSidStorage: ComateSidStorage
+  /** Why a sealed sid could not be opened; `undefined` unless `wpsSidStorage` is `unreadable`. */
+  wpsSidProblem?: ComateOpenFailure | undefined
+  /** Key file the sealed value is bound to. A path, never the key. */
+  wpsSidKeyFile: string
   hints: string[]
+}
+
+/**
+ * How the stored `wps_sid` is protected at rest.
+ *
+ * Four states, not a boolean: `plaintext` is the upgrade path (a value written by
+ * an older version is still readable and should be re-saved), while `unreadable`
+ * is the failure the user must be told about explicitly — both are "a sid is
+ * configured", and collapsing them into `set` is how a broken key file turns into
+ * an unexplained 401.
+ */
+export type ComateSidStorage =
+  /** Nothing stored. */
+  | 'unset'
+  /** Stored as typed (a value written before 0.4, or from the env var). */
+  | 'plaintext'
+  /** Sealed and decryptable. */
+  | 'sealed'
+  /** Sealed, but this machine/user cannot open it (key file gone, replaced, or foreign). */
+  | 'unreadable'
+
+/** One read's view of the stored sid, plaintext included. Never logged or returned raw. */
+export interface ComateSidResolution {
+  /** Usable plaintext sid; absent when nothing usable is stored. */
+  sid?: string
+  storage: ComateSidStorage
+  /** Set exactly when `storage` is `unreadable`. */
+  problem?: ComateOpenFailure
+  /** The key file in force for this read. */
+  keyFile: string
 }
 
 function nonEmptyEnv(value: unknown): string | undefined {
@@ -143,6 +209,30 @@ export function defaultConfigCandidates(
 ): string[] {
   const root = defaultComateHome(env, home)
   return [join(root, COMATE_CONFIG_FILENAME), join(root, COMATE_AGENT_SUBDIR, COMATE_MODELS_FILENAME)]
+}
+
+/**
+ * Where the key that protects the stored `wps_sid` lives by default.
+ *
+ * Under the Comate home, NOT under the DSH profile: the whole point of sealing
+ * the sid is that the profile's settings document can leave this machine (be
+ * shared, synced, backed up, committed) without the credential going with it, so
+ * the key must not sit in the same directory tree as the ciphertext.
+ *
+ * It is a plain file, deliberately: OS keychain access would mean a native
+ * dependency or a platform-specific API call, and a master password would mean
+ * the user unlocking something before every headless run.
+ *
+ * @param env - environment to read {@link COMATE_SECRET_KEY_ENV} from.
+ * @param home - home directory to resolve the Comate home against.
+ * @returns the absolute key-file path.
+ */
+export function defaultSecretKeyFile(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  return nonEmptyEnv(env[COMATE_SECRET_KEY_ENV])
+    ?? join(defaultComateHome(env, home), COMATE_SECRET_DIRNAME, COMATE_SECRET_KEY_FILENAME)
 }
 
 /**
@@ -284,6 +374,9 @@ export interface ComateStoreOptions {
    * Manual WPS login cookie value (`wps_sid` from www.wps.cn). The desktop
    * config only stores placeholders (the real cookie is delivered per task
    * by the Comate UI), so the sid can be pasted here as `wps_sid=<v>`.
+   *
+   * Either spelling is accepted: a sealed value (`enc:v1:…`, what the card now
+   * stores) or plaintext (what older versions stored).
    */
   wpsSid?: string
   /**
@@ -291,6 +384,8 @@ export interface ComateStoreOptions {
    * too) and authenticate with the Cookie alone.
    */
   cookieOnly?: boolean
+  /** Explicit key-file path, overriding env and the Comate-home default. */
+  secretKeyFile?: string
 }
 
 /**
@@ -301,11 +396,13 @@ export class ComateCredentialStore {
   private configFileOverride: string | undefined
   private wpsSidOverride: string | undefined
   private cookieOnlyOverride: boolean
+  private secretKeyFileOverride: string | undefined
 
   constructor(options: ComateStoreOptions = {}) {
     this.configFileOverride = options.configFile
     this.wpsSidOverride = options.wpsSid
     this.cookieOnlyOverride = options.cookieOnly === true
+    this.secretKeyFileOverride = options.secretKeyFile
   }
 
   /** Repoint the config file; applies on the next read. */
@@ -313,7 +410,14 @@ export class ComateCredentialStore {
     this.configFileOverride = path
   }
 
-  /** Set the manual wps_sid cookie value; applies on the next read. */
+  /**
+   * Set the manual wps_sid; applies on the next read.
+   *
+   * The value is whatever the settings document holds — sealed (`enc:v1:…`) or
+   * legacy plaintext — and is deliberately NOT decrypted here: this setter runs
+   * inside the synchronous settings-change handler, and keeping the raw string
+   * means the plaintext only exists for the one read that actually needs it.
+   */
   setWpsSid(sid: string | undefined): void {
     this.wpsSidOverride = sid
   }
@@ -323,10 +427,81 @@ export class ComateCredentialStore {
     this.cookieOnlyOverride = value
   }
 
-  /** Manual sid from options or env (`WPS_COMATE_SID`), if any. */
-  private sidOverride(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  /** Repoint the key file that protects a sealed sid; applies on the next read. */
+  setSecretKeyFile(path: string | undefined): void {
+    this.secretKeyFileOverride = path
+  }
+
+  /** The key file in force: explicit override, env, then the Comate-home default. */
+  keyFile(env: NodeJS.ProcessEnv = process.env): string {
+    return this.secretKeyFileOverride ?? defaultSecretKeyFile(env)
+  }
+
+  /** The raw stored value (settings override or env), still sealed if sealed. */
+  private rawSid(env: NodeJS.ProcessEnv = process.env): string | undefined {
     const sid = this.wpsSidOverride ?? nonEmptyEnv(env[COMATE_SID_ENV])
     return sid === undefined || sid.trim() === '' ? undefined : sid.trim()
+  }
+
+  /**
+   * The raw value that came from the SETTINGS document, env ignored.
+   *
+   * The plaintext-upgrade path must act on what is actually stored: sealing the
+   * `WPS_COMATE_SID` env value and writing that back would put a credential the
+   * user only ever meant for one shell session into a persisted file.
+   */
+  private storedRawSid(): string | undefined {
+    const sid = this.wpsSidOverride
+    return sid === undefined || sid.trim() === '' ? undefined : sid.trim()
+  }
+
+  /**
+   * Resolve the stored sid for one read, decrypting a sealed value.
+   *
+   * @param env - environment to read {@link COMATE_SID_ENV} from.
+   * @returns the usable sid (if any), how it was stored, and the key file used.
+   */
+  async resolveSid(env: NodeJS.ProcessEnv = process.env): Promise<ComateSidResolution> {
+    const raw = this.rawSid(env)
+    const keyFile = this.keyFile(env)
+    if (raw === undefined) return { storage: 'unset', keyFile }
+    // No envelope means a value written before 0.4 (or a user-supplied env one):
+    // read it as-is rather than refusing it, so an upgrade never loses the
+    // credential that is already working.
+    if (!isSealedComateSecret(raw)) return { sid: raw, storage: 'plaintext', keyFile }
+    const opened = await openSecret(raw, { keyFile })
+    return opened.ok
+      ? { sid: opened.value, storage: 'sealed', keyFile }
+      : { storage: 'unreadable', problem: opened.reason, keyFile }
+  }
+
+  /**
+   * Seal a plaintext sid into its storable form.
+   *
+   * @param sid - the value as typed; trimmed, and an empty one is refused.
+   * @returns the sealed string plus the plaintext length, for the card's copy.
+   * @throws {Error} when the key file cannot be created or read.
+   */
+  async seal(sid: string, env: NodeJS.ProcessEnv = process.env): Promise<ComateSealAnswer> {
+    const trimmed = sid.trim()
+    if (trimmed === '') throw new Error('comate: refusing to seal an empty sid')
+    return { sealed: await sealSecret(trimmed, { keyFile: this.keyFile(env) }), length: trimmed.length }
+  }
+
+  /**
+   * Seal the value already stored in the settings document.
+   *
+   * This is the plaintext-upgrade path: the host seals what it already holds, so
+   * the plaintext never has to travel through the browser to be re-saved.
+   *
+   * @throws {Error} when nothing is stored, the stored value is already sealed,
+   * or the key file cannot be used.
+   */
+  async sealStored(env: NodeJS.ProcessEnv = process.env): Promise<ComateSealAnswer> {
+    const stored = this.storedRawSid()
+    if (stored === undefined) throw new Error('comate: no stored wps_sid to seal')
+    if (isSealedComateSecret(stored)) throw new Error('comate: the stored wps_sid is already sealed')
+    return await this.seal(stored, env)
   }
 
   /** The config-file candidates, in probe order. */
@@ -371,10 +546,14 @@ export class ComateCredentialStore {
   async current(override: ComateCredentialOverride = {}): Promise<ComateCredential | undefined> {
     const draftSid = nonEmptyString(override.wpsSid)
     const cookieOnly = override.cookieOnly ?? this.cookieOnlyOverride
+    // Resolved once, outside the candidate loop: the stored sid does not depend on
+    // which config file answers. A draft skips the read entirely, so probing a
+    // typed value cannot fail because the SAVED one has an unusable key file.
+    const storedSid = draftSid === undefined ? (await this.resolveSid()).sid : undefined
+    const sid = draftSid ?? storedSid
     for (const path of this.candidates()) {
       const { credential } = await this.readCandidate(path)
       if (credential !== undefined) {
-        const sid = draftSid ?? this.sidOverride()
         if (sid !== undefined || cookieOnly) {
           return {
             ...credential,
@@ -427,7 +606,8 @@ export class ComateCredentialStore {
     }
     const signIn = (await this.status()).state
     const userAuthPresent = await this.userAuthPresent(env, home)
-    const wpsSid: ComateDoctorReport['wpsSid'] = this.sidOverride(env) === undefined ? 'unset' : 'set'
+    const sid = await this.resolveSid(env)
+    const wpsSid: ComateDoctorReport['wpsSid'] = sid.storage === 'unset' ? 'unset' : 'set'
     const hints: string[] = []
     if (signIn !== 'signed-in') {
       hints.push('Sign in once in the WPS Comate desktop client (it writes ~/.wpscomate/config.json), then run status again.')
@@ -435,8 +615,14 @@ export class ComateCredentialStore {
     if (!candidates.some(candidate => candidate.present)) {
       hints.push(`No Comate config file found; set ${COMATE_CONFIG_ENV} if it lives elsewhere.`)
     }
-    if (wpsSid === 'unset') {
+    if (sid.storage === 'unset') {
       hints.push('The desktop config stores placeholder apiKey/cookie only (the real credential is delivered per task by the Comate UI), so llmproxy answers 401. Fill `wpsSid` in the DSH plugin settings (wps_sid from www.wps.cn cookies) or set WPS_COMATE_SID.')
+    }
+    if (sid.storage === 'plaintext') {
+      hints.push('The stored wps_sid is still PLAINTEXT in the DSH settings document. Open the plugin card once — it upgrades the value in place — or run `dsh-connect-comate seal` and paste the result yourself.')
+    }
+    if (sid.storage === 'unreadable') {
+      hints.push(`The stored wps_sid is sealed but cannot be decrypted (${sid.problem}); the key file ${sid.keyFile} is missing, unreadable, or was created for another machine/user. Paste the sid again in the plugin card, or point ${COMATE_SECRET_KEY_ENV} at the right key file.`)
     }
     if (userAuthPresent === false) {
       hints.push('No user_auth.json found; the plugin relies on config.json as-is (token refresh is a future step).')
@@ -450,6 +636,12 @@ export class ComateCredentialStore {
       userAuthPresent,
       signIn,
       wpsSid,
+      wpsSidStorage: sid.storage,
+      // Always present, `undefined` when there is nothing to report: an optional
+      // field assigned `undefined` is dropped by JSON.stringify, so the `--json`
+      // document stays clean without a conditional spread here.
+      wpsSidProblem: sid.problem,
+      wpsSidKeyFile: sid.keyFile,
       hints,
     }
   }
@@ -470,6 +662,12 @@ export class ComateCredentialStore {
   /**
    * The plugin keeps no credential copy of its own, so there is nothing to
    * remove; the Comate desktop files are never touched.
+   *
+   * The key file is deliberately left alone as well: deleting it would not
+   * "log out", it would only make every already-stored ciphertext permanently
+   * unopenable (and the next seal would mint a different key behind the user's
+   * back). Removing the sid means clearing the settings field, which the card's
+   * 「清除已存的 sid」 does.
    */
   async logout(): Promise<void> {}
 }

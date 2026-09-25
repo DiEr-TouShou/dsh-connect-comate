@@ -22,25 +22,32 @@ import {
   defaultComateHome,
   defaultConfigCandidates,
 } from './auth.ts'
+import { isSealedComateSecret } from './bridge.ts'
 import { runComateCheck, safeMessage } from './check.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import { COMATE_CONNECT_VERSION } from './version.ts'
 
-type Action = 'check' | 'doctor' | 'logout' | 'status'
+type Action = 'check' | 'doctor' | 'logout' | 'seal' | 'status'
 
 const JSON_SCHEMA_VERSION = 1
 
 function printHelp(): void {
   process.stdout.write([
-    'Usage: dsh-connect-comate <check|doctor|status|logout> [--json]',
+    'Usage: dsh-connect-comate <check|doctor|seal|status|logout> [--json]',
     '',
     '  check    send one minimal chat request; verifies the credential works',
     '  doctor   secret-free sign-in and environment diagnostics',
+    '  seal     encrypt a wps_sid into the value to store (reads stdin, or WPS_COMATE_SID)',
     '  status   sign-in state and model directory summary',
     '  logout   v0.1 keeps no plugin-owned credential copy; reports only',
-    '  --json   emit one secret-free JSON document (doctor/status only)',
+    '  --json   emit one secret-free JSON document (doctor/status/seal only)',
     '',
-    'Env: WPS_COMATE_SID (manual wps_sid cookie) applies to check/status/doctor.',
+    'Env: WPS_COMATE_SID (manual wps_sid cookie; a sealed value works too) applies',
+    '     to check/status/doctor/seal. WPS_COMATE_SECRET_KEY_FILE points the key',
+    '     file elsewhere (default ~/.wpscomate/dsh-connect-comate/secret.key).',
+    '',
+    'seal prints ONLY the sealed value on stdout, so it can be redirected straight',
+    'into a settings file; notes and errors go to stderr.',
     '',
   ].join('\n'))
 }
@@ -70,7 +77,9 @@ async function doctor(jsonOutput: boolean): Promise<number> {
         + `${candidate.error === undefined ? '' : ` (${candidate.error})`}`,
       ),
       `user_auth.json present: ${report.userAuthPresent}`,
-      `Manual wps_sid: ${report.wpsSid}`,
+      `Manual wps_sid: ${report.wpsSid} (storage=${report.wpsSidStorage}`
+      + `${report.wpsSidProblem === undefined ? '' : `, problem=${report.wpsSidProblem}`})`,
+      `wps_sid key file: ${report.wpsSidKeyFile}`,
       ...report.hints.map(hint => `Hint: ${hint}`),
       '',
     ].join('\n'))
@@ -152,6 +161,74 @@ async function check(): Promise<number> {
   return 1
 }
 
+/**
+ * Read all of stdin as UTF-8 text.
+ *
+ * Used by `seal` instead of an argument on purpose: a sid passed as an argv lands
+ * in the shell history and in every process listing on the machine.
+ */
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/**
+ * Encrypt a plaintext sid into the value the settings document should hold.
+ *
+ * The command-line counterpart of the card's save — same store, same key file,
+ * same envelope. It exists for the two cases the card cannot serve: a deployment
+ * with no host web route (so the card has nothing to call), and a hand-edited
+ * `cordis.patch.yml` where the user wants to paste the ciphertext themselves.
+ */
+async function seal(jsonOutput: boolean): Promise<number> {
+  const store = makeStore()
+  const keyFile = store.keyFile()
+  const fromEnv = (process.env[COMATE_SID_ENV] ?? '').trim()
+  let raw = fromEnv
+  if (raw === '') {
+    if (process.stdin.isTTY === true) {
+      process.stderr.write('Paste the wps_sid value, then press Enter (Ctrl+D / Ctrl+Z to cancel):\n')
+    }
+    raw = await readStdin()
+  }
+  // Pasting the whole cookie is the common mistake; the value is what follows "=".
+  const stripped = raw.replace(/^wps_sid=/iu, '').trim()
+  if (stripped !== raw.trim()) {
+    process.stderr.write('dsh-connect-comate: stripped the "wps_sid=" prefix from the pasted cookie\n')
+  }
+  if (stripped === '') {
+    process.stderr.write('dsh-connect-comate: nothing to seal (no sid on stdin or in WPS_COMATE_SID)\n')
+    return 1
+  }
+  if (isSealedComateSecret(stripped)) {
+    process.stderr.write('dsh-connect-comate: that value is already sealed; nothing to do\n')
+    return 1
+  }
+  const answer = await store.seal(stripped)
+  if (jsonOutput) {
+    printJson({
+      schemaVersion: JSON_SCHEMA_VERSION,
+      package: 'dsh-connect-comate',
+      version: COMATE_CONNECT_VERSION,
+      sealed: answer.sealed,
+      length: answer.length,
+      keyFile,
+    })
+    return 0
+  }
+  process.stdout.write(`${answer.sealed}\n`)
+  process.stderr.write([
+    `sealed ${answer.length} character(s); key file: ${keyFile}`,
+    'Store it as the wpsSid value of the dsh-connect-comate entry in cordis.patch.yml,',
+    'or just paste the plaintext in the plugin card (it seals on save).',
+    'It only decrypts on this machine and user account while that key file exists;',
+    'if the key file is lost, paste the sid again to store a new one.',
+    '',
+  ].join('\n'))
+  return 0
+}
+
 /** Execute one boot-free command. */
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
@@ -159,15 +236,15 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 0
   }
   const [rawAction, ...flags] = argv
-  const actions: readonly Action[] = ['check', 'doctor', 'logout', 'status']
+  const actions: readonly Action[] = ['check', 'doctor', 'logout', 'seal', 'status']
   if (!actions.includes(rawAction as Action)) {
-    process.stderr.write(`dsh-connect-comate: expected check, doctor, logout, or status; got ${JSON.stringify(rawAction)}\n`)
+    process.stderr.write(`dsh-connect-comate: expected check, doctor, logout, seal, or status; got ${JSON.stringify(rawAction)}\n`)
     return 1
   }
   const action = rawAction as Action
   const jsonOutput = flags.includes('--json')
   const unknown = flags.filter(flag => flag !== '--json')
-  if (unknown.length > 0 || (jsonOutput && action !== 'doctor' && action !== 'status')) {
+  if (unknown.length > 0 || (jsonOutput && action !== 'doctor' && action !== 'status' && action !== 'seal')) {
     process.stderr.write(`dsh-connect-comate: invalid options for ${action}: ${flags.join(' ')}\n`)
     return 1
   }
@@ -177,6 +254,8 @@ export async function run(argv: readonly string[]): Promise<number> {
         return await check()
       case 'doctor':
         return await doctor(jsonOutput)
+      case 'seal':
+        return await seal(jsonOutput)
       case 'status':
         return await status(jsonOutput)
       case 'logout': {

@@ -73,6 +73,70 @@ export const COMATE_REFRESH_PATH = '/plugins/dsh-connect-comate/__refresh'
  */
 export const COMATE_CHECK_PATH = '/plugins/dsh-connect-comate/__check'
 
+/**
+ * Action route: seal a plaintext `wps_sid` into its storable form.
+ *
+ * The browser half cannot do this itself: the encryption key is host-side
+ * (a key file plus this machine's fingerprint, see `./secret.ts`), and the
+ * browser has no business holding it. So the card sends the typed value over the
+ * same loopback path the connection probe already uses and gets back only the
+ * ciphertext to store.
+ *
+ * Two inputs, one route: a typed `sid`, or `fromStored: true` to seal whatever is
+ * already saved — the latter is how a plaintext value left by an older version is
+ * upgraded WITHOUT the plaintext ever entering the browser.
+ */
+export const COMATE_SEAL_PATH = '/plugins/dsh-connect-comate/__seal'
+
+/**
+ * Prefix of a sealed (encrypted) `wps_sid` value.
+ *
+ * Declared here, not in `./secret.ts`, because **both halves** must agree on it:
+ * the host writes and reads it, and the card has to tell "already sealed" from
+ * "still plaintext" without importing `node:crypto`. `./secret.ts` imports this
+ * constant, so the spelling exists once.
+ */
+export const COMATE_SEALED_PREFIX = 'enc:v1:'
+
+/**
+ * Shortest possible base64url body of a sealed value: 12-byte IV + 16-byte GCM
+ * tag + at least 1 byte of ciphertext.
+ *
+ * Only used to reject obviously-junk strings early (a hand-edited `enc:v1:` with
+ * nothing behind it). The authoritative structural check is in `./secret.ts`,
+ * which actually parses the payload.
+ */
+const COMATE_SEALED_MIN_CHARS = 39
+
+/**
+ * Whether a stored value carries this plugin's sealed envelope.
+ *
+ * Anything without the prefix is a LEGACY PLAINTEXT value: every version before
+ * 0.4 wrote one, so the host must keep reading it and the card must offer to
+ * upgrade it. This predicate is deliberately about the envelope only — whether a
+ * sealed value can actually be opened depends on the key file, which only the
+ * host can touch.
+ */
+export function isSealedComateSecret(value: string): boolean {
+  if (!value.startsWith(COMATE_SEALED_PREFIX)) return false
+  const body = value.slice(COMATE_SEALED_PREFIX.length)
+  return body.length >= COMATE_SEALED_MIN_CHARS && /^[A-Za-z0-9_-]+$/.test(body)
+}
+
+/** The seal route's answer. Never carries the plaintext back. */
+export interface ComateSealAnswer {
+  /** The value to store in the settings field. */
+  sealed: string
+  /**
+   * Length of the plaintext that was sealed.
+   *
+   * Exists so the card can keep telling the user "N characters saved" — the
+   * length is the only property of the credential the UI ever showed, and after
+   * sealing it can no longer be read off the stored string.
+   */
+  length: number
+}
+
 /** Card-facing model directory entry. */
 export interface ComatePersistedModel {
   id: string
@@ -133,11 +197,31 @@ export type UpstreamErrorKind =
   | 'server'
   | 'client'
 
+/**
+ * How the stored `wps_sid` is protected.
+ *
+ * `unreadable` is the one state the BROWSER cannot work out for itself: a sealed
+ * envelope looks identical whether or not this machine's key file can open it,
+ * so the card needs the host to tell it. Every other state is derivable from the
+ * stored string's shape alone.
+ */
+export type ComateSidStorage = 'unset' | 'plaintext' | 'sealed' | 'unreadable'
+
 /** The status route's answer. Deliberately contains no credential of any kind. */
 export interface ComateCatalogAnswer {
   signedIn: boolean
   providerRegistered: boolean
   models: readonly ComatePersistedModel[]
+  /**
+   * Storage state of the saved `wps_sid`, as resolved by the host.
+   *
+   * Absent when the host could not determine it (the route needs `webServer`,
+   * and a deployment without one still serves models); the card then falls back
+   * to reading the stored string's prefix.
+   */
+  sidStorage?: ComateSidStorage
+  /** Why a sealed value could not be opened; only sent with `unreadable`. */
+  sidProblem?: string
 }
 
 /** Why a probe could not run at all (as opposed to running and failing). */

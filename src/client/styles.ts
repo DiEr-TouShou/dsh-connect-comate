@@ -45,6 +45,12 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-sid-row{display:flex;gap:8px;align-items:center}
 .dsm-comate-sid-row .dsm-comate-input{flex:1;min-width:0}
 .dsm-comate-sid-row .dsm-btn{flex:none;white-space:nowrap}
+/* 密码型输入：圆点本身由 type=password 负责，这里只补两点。letter-spacing 让圆点
+   不至于挤成一条线（也避免等宽字体下按字符数估计长度）；user-select:none 掐掉
+   拖拽选中，是「不可复制」里除事件拦截外的第二道。 */
+.dsm-comate-input-secret{letter-spacing:.14em;user-select:none;-webkit-user-select:none}
+.dsm-comate-input-secret::placeholder{letter-spacing:normal}
+.dsm-comate-status-warn{color:var(--dsw-alias-state-warning-primary,#d9a320)}
 .dsm-comate-number-row{display:flex;align-items:center;gap:8px}
 .dsm-comate-input-number{width:160px;flex:none}
 .dsm-comate-unit{font-size:12px;color:var(--dsw-alias-label-tertiary,#9aa0a8)}

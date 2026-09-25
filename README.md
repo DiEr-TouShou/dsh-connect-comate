@@ -34,18 +34,61 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 
 > ⚠️ **鉴权现状（重要）**：`~/.wpscomate/config.json` 里的 `apiKey` / `headers.cookie` 是**占位符**（cookie 字面值就是 `COOKIE`）。真实凭据由 Comate UI 每次任务通过本地 websocket 下发（`env.COOKIE` + `modelConfig.apiKey`），不落盘。因此 v0.1 需要**手动填写一次 wps_sid**（见下），或用 `WPS_COMATE_SID` 环境变量。
 
+> 🔒 **落盘形态（0.4 起）**：填进设置文档的 `wpsSid` 由宿主**加密后**写入（`enc:v1:…`），不存明文；卡片里它是**密码框**——只显示圆点，复制/剪切/拖拽/右键都被拦掉。详见「`wps_sid` 的保存方式（0.4 起）」。
+
 ## 鉴权：手动填 wps_sid（v0.1 必需）
 
 1. 浏览器打开 https://www.wps.cn/ 并登录；
 2. F12 → Application/应用 → Cookies → `https://www.wps.cn` → 复制 `wps_sid` 的**值**（只复制值，不要带 `wps_sid=` 前缀）；
-3. 打开 DSH 的 **插件（Plugins）页**，找到 `dsh-connect-comate` 这一项，进入它的配置页（0.1.7 上是 bundle/row 的配置页；0.1.5 上是「设置 → 插件」里的卡片），把值粘贴进 `wps_sid Cookie` 输入框后点保存——保存即生效，下一条对话就会使用，无需再重启；页面下方的「启用的模型」可以勾选要在 DSH 模型列表里显示的模型（见下节）；
+3. 打开 DSH 的 **插件（Plugins）页**，找到 `dsh-connect-comate` 这一项，进入它的配置页（0.1.7 上是 bundle/row 的配置页；0.1.5 上是「设置 → 插件」里的卡片），把值粘贴进 `wps_sid Cookie` 输入框后点保存——保存即生效，下一条对话就会使用，无需再重启。输入框是**密码型**（圆点显示、不可复制），保存后也不回显——这是有意的，这个值不该被看第二眼；页面下方的「启用的模型」可以勾选要在 DSH 模型列表里显示的模型（见下节）；
 4. 也可以把值填进 **profile 覆盖层** `C:\Users\<你>\.dsh\profiles\web\cordis.patch.yml`（UI 卡片写入的设置与这里的配置会自动合并，UI 优先）：
    ```yaml
    - id: dsh-connect-comate
      config:
-       wpsSid: 粘贴sid值
+       wpsSid: 粘贴sid值      # 明文也收；卡片一打开就会就地升级成 enc:v1: 密文
    ```
    验证是否生效：`dsh --profile web --dump-config`，应看到 dsh-connect-comate 节点下带上 `config.wpsSid`。
+
+## `wps_sid` 的保存方式（0.4 起）
+
+这个值以前是以明文躺在 profile 的 `cordis.patch.yml` 里的，而那个文件会被同步、被备份、进仓库、被贴进 issue。现在它是一串密文：
+
+```yaml
+config:
+  wpsSid: enc:v1:<base64url(IV ‖ GCM tag ‖ 密文)>
+```
+
+解开的钥匙**不在同一棵目录树里**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`，权限 0600）里的随机盐，加上**本机指纹**（平台 / 架构 / 主机名 / 用户名）经 scrypt 派生出 AES-256-GCM 的 key。密文自带随机 IV 与认证标签，改一个字节就会解密失败。
+
+存储状态有四种，卡片的状态行会报出当前那一种是哪一种（`doctor` 报的是同一套名字，但它读的是 `WPS_COMATE_SID` 环境变量 —— 一个独立的 CLI 进程读不到 DSH 的 profile 设置文档，所以卡片存的那份要看卡片状态行）：
+
+| `wpsSidStorage` | 含义 | 要做什么 |
+| --- | --- | --- |
+| `unset` | 没存过 | 按上面「手动填 wps_sid」填一次 |
+| `plaintext` | 0.4 之前写的明文值，**仍然可用** | 打开卡片会自动升级；也可点状态行旁的「升级为密文」 |
+| `sealed` | 密文，能解开 | 无需操作 |
+| `unreadable` | 密文在，但这台机器 / 这个用户打不开 | 按 hint 指认的原因处理（密钥文件被删、被换、来自别的机器）：重新粘贴一次，或用 `WPS_COMATE_SECRET_KEY_FILE` 指向正确的密钥文件 |
+
+```powershell
+node lib\bin.js seal        # 读 stdin 或 WPS_COMATE_SID，打印密文（stdout 只有密文，可重定向）
+node lib\bin.js doctor      # 看 wpsSidStorage / wpsSidProblem / wpsSidKeyFile（是路径，不是密钥）
+```
+
+两处入口分工不同：**卡片**的「立即加密」是就地升级设置文档里那份值（只有宿主读得到它），`seal` 子命令则是给你手改 `cordis.patch.yml` 时生成密文用的（读 stdin / 环境变量）。用环境变量可以完整跑一遍四种状态：
+
+```powershell
+$env:WPS_COMATE_SECRET_KEY_FILE = "$env:TEMP\probe.key"
+$env:WPS_COMATE_SID = "V02example"
+$sealed = node lib\bin.js seal                       # stdout 只有密文
+node lib\bin.js doctor                               # storage=sealed
+$env:WPS_COMATE_SID = $sealed
+Rename-Item $env:WPS_COMATE_SECRET_KEY_FILE "$env:WPS_COMATE_SECRET_KEY_FILE.gone"
+node lib\bin.js doctor                               # storage=unreadable, problem=key-missing
+```
+
+**这个加密防什么、不防什么**：它防「文件被搬走」——profile 被同步到另一台机器、备份被翻出来、仓库被 clone，密文都解不开。它**不防**「本机被攻破」：密钥文件就在同一个用户的 home 下，任何能以该用户身份执行代码的人都能解开。这是刻意的取舍——走 OS keychain 要引入原生依赖或平台 API，用主密码则要求每次无人值守运行前先解锁。同理，换机器 / 换用户名 / 换密钥文件之后旧密文就解不开了，这是设计行为，不是 bug。
+
+`WPS_COMATE_SID` 环境变量的值**不会**被加密写回设置文档：那是一次性的 shell 覆盖，不是要求持久化的凭据。
 
 > 若上游报 API 密钥无效，在卡片里勾选「只用 Cookie 鉴权」（cookieOnly）再保存。
 > 命令行临时验证（不走 DSH 设置）：
@@ -191,7 +234,9 @@ node lib/bin.js doctor
 ```sh
 # 状态（只读）
 curl http://127.0.0.1:<DSH web 端口>/plugins/dsh-connect-comate/__catalog
-# {"signedIn":true,"providerRegistered":true,"models":[...]}
+# {"signedIn":true,"providerRegistered":true,"models":[...],"sidStorage":"sealed"}
+# sidStorage 是宿主对「存着的那份 wps_sid」的判定（unset/plaintext/sealed/unreadable）；
+# 打不开时会多一个 sidProblem（如 key-missing）。没有凭据存储的部署两个字段都不出现。
 
 # 刷新模型目录（重读本机 Comate 配置，不写任何文件）
 curl -X POST -H 'content-type: application/json' \
@@ -225,12 +270,13 @@ pnpm run check   # typecheck + test + build
 | `WPS_COMATE_HOME` | 显式指定 Comate 家目录（默认 `~/.wpscomate`） |
 | `WPS_COMATE_SID` | 手动提供 wps_sid 值（与 DSH 设置里的 `wpsSid` 等效，命令行验证用） |
 | `WPS_COMATE_MAX_TOKENS` | 覆盖输出 token 上限（正整数；`0` = 不限制）。存在即优先于设置里的 `maxOutputTokens`，无头脚本用 |
+| `WPS_COMATE_SECRET_KEY_FILE` | 显式指定密钥文件路径（默认 `$WPS_COMATE_HOME/dsh-connect-comate/secret.key`）。profile 从别处搬来、或想共用同一把钥匙时用 |
 
 插件 Config（通过 profile 覆盖层 `profiles/<profile>/cordis.patch.yml` 的 `config:` 传入）：
 
 | 设置 | 作用 |
 | --- | --- |
-| `wpsSid` | 手动填写的 wps_sid（www.wps.cn cookies 取值，不带前缀） |
+| `wpsSid` | 手动填写的 wps_sid（www.wps.cn cookies 取值，不带前缀）。**密文保存**：明文只在卡片里输入的那一刻存在，宿主写入前会加密成 `enc:v1:…`；手写明文也兼容（卡片一打开就升级） |
 | `cookieOnly` | 只发 Cookie 鉴权（上游报 API 密钥无效时开启） |
 | `enabledModelIds` | 勾选启用的模型 id 列表；空 = 全部显示（一般用卡片勾选，不用手填） |
 | `maxOutputTokens` | 每个请求的输出 token 上限（正整数）；`0` = 不限制，交给上游。缺省用插件默认 32000 |
@@ -255,10 +301,13 @@ pnpm run check   # typecheck + test + build
 
 ## 实机验证清单
 
-1. `node lib/bin.js doctor` —— 应显示 `valid=true` 且列出 baseUrl 与 8 个模型；`Manual wps_sid` 应为 `unset`（未填时）。
+1. `node lib/bin.js doctor` —— 应显示 `valid=true` 且列出 baseUrl 与 8 个模型；`Manual wps_sid` 应为 `unset`（未填时），`wpsSidStorage` 同步为 `unset`。
 2. 填入 wpsSid 后 `node lib/bin.js check`（或 `dsh plugin exec ... check`）—— 输出 `OK` 表示上游接受凭据。
-3. 安装到 DSH 并重启后，模型选择器应出现 `WPS Comate` provider 与模型列表。
-4. 首次真实对话（会消耗账号额度）：选一个模型发起对话。若失败，看错误：
+3. 密文链路自查（两条独立的通道，各自都能单独跑）：
+   - **卡片通道**：在卡片里保存一次 wps_sid → 状态行应显示「已配置（密文保存）」；直接看 profile 的 `cordis.patch.yml`，`wpsSid` 应是一串 `enc:v1:…` 而**不是** `V02…` 开头的明文。把密钥文件改名后重开卡片，状态行应变成「本机解不开」并带出 `key-missing` 原因（宿主把这份判定随目录路由一起下发，浏览器自己看不出差别）。
+   - **CLI 通道**：按上面「保存方式」一节的环境变量脚本走一遍 `seal` → `doctor`（`sealed`）→ 移走密钥文件 → `doctor`（`unreadable` + `key-missing`）。注意 `doctor` 读的是 `WPS_COMATE_SID`，看不到卡片存的那份值——这不是缺陷，是独立进程读不到 DSH 设置文档。
+4. 安装到 DSH 并重启后，模型选择器应出现 `WPS Comate` provider 与模型列表。
+5. 首次真实对话（会消耗账号额度）：选一个模型发起对话。若失败，看错误：
    - 401 `not_login` → 重新复制 wps_sid（www.wps.cn 的 cookie），确认不带前缀；
    - 仍 401 且提示密钥无效 → 开启 `cookieOnly`；
    - 400 → model id 可能需要用短名（桌面端实际请求用 `flash` 等短名，见 `~/.wpscomate/agent/logs/sidecar.log`）。

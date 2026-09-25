@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import z from '@deepseek-ai/schemastery'
 import { COMATE_PROVIDER, comateModelInput, createComateAdapter } from './adapter.ts'
 import { ComatePresignUploader } from './assets.ts'
-import type { ComateModel } from './auth.ts'
+import type { ComateModel, ComateSidResolution } from './auth.ts'
 import { COMATE_DEFAULT_MAX_TOKENS, ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
 import { runComateCheck, type ComateCheckOutcome } from './check.ts'
@@ -38,7 +38,7 @@ import {
   type ComatePersistedModel,
 } from './bridge.ts'
 import { bindComateSettings } from './settings-surface.ts'
-import { registerComateStatusRoute, type ComateCheckInput } from './web-status.ts'
+import { registerComateStatusRoute, type ComateCheckInput, type ComateSealInput } from './web-status.ts'
 
 export { COMATE_PROVIDER, createComateAdapter, comateModelInput, type ComateAdapter } from './adapter.ts'
 export { createComateShim, type ComateShim } from './shim.ts'
@@ -50,13 +50,17 @@ export {
   COMATE_CLIENT_NAME,
   COMATE_ENTRY_ID,
   COMATE_REFRESH_PATH,
+  COMATE_SEALED_PREFIX,
+  COMATE_SEAL_PATH,
   COMATE_SETTINGS_NS,
+  isSealedComateSecret,
   unwrapVolatile,
   unwrapVolatileDeep,
   type ComateCatalogAnswer,
   type ComateCheckOutcome,
   type ComateCheckReason,
   type ComatePersistedModel,
+  type ComateSealAnswer,
   type ComateSettingsValue,
 } from './bridge.ts'
 export {
@@ -71,6 +75,7 @@ export {
   type ComateActionDeps,
   type ComateCatalogDeps,
   type ComateCheckInput,
+  type ComateSealInput,
 } from './web-status.ts'
 export {
   bindComateSettings,
@@ -80,12 +85,14 @@ export {
 export {
   COMATE_CONFIG_ENV,
   COMATE_HOME_ENV,
+  COMATE_SECRET_KEY_ENV,
   COMATE_SID_ENV,
   COMATE_DEFAULT_CONTEXT_WINDOW,
   COMATE_DEFAULT_MAX_TOKENS,
   ComateCredentialStore,
   defaultComateHome,
   defaultConfigCandidates,
+  defaultSecretKeyFile,
   parseComateConfig,
   parseComateModel,
   type ComateAuthStatus,
@@ -93,8 +100,21 @@ export {
   type ComateCredential,
   type ComateDoctorReport,
   type ComateModel,
+  type ComateSidResolution,
+  type ComateSidStorage,
   type ComateStoreOptions,
 } from './auth.ts'
+export {
+  COMATE_SECRET_DIRNAME,
+  COMATE_SECRET_KEY_FILENAME,
+  isSealed,
+  machineFingerprint,
+  openSecret,
+  sealSecret,
+  type ComateOpenFailure,
+  type ComateOpenResult,
+  type ComateSecretOptions,
+} from './secret.ts'
 export {
   classifyUpstreamError,
   ComateUpstreamClient,
@@ -196,7 +216,7 @@ const persistedModelConfig = z.object({
 export const Config: z<Config> = z.object({
   configFile: z.string().description('WPS Comate config.json 路径（默认 ~/.wpscomate/config.json）'),
   wpsSid: asVolatile(z.string().description(
-    '手动填写的 WPS 登录 Cookie：打开 www.wps.cn → F12 → Application → Cookies 取 wps_sid 的值（只填值，不带 "wps_sid=" 前缀）',
+    '手动填写的 WPS 登录 Cookie：打开 www.wps.cn → F12 → Application → Cookies 取 wps_sid 的值（只填值，不带 "wps_sid=" 前缀）。卡片里以密码框呈现（只显示圆点、不可复制），保存时由宿主加密成 enc:v1: 密文再写入本文件，因此这里通常是一串密文而非明文。',
   )),
   cookieOnly: asVolatile(z.boolean().description('只使用 Cookie 鉴权（不发送 Authorization 头）；上游报 API 密钥无效时开启')),
   lastCatalog: z.array(persistedModelConfig).default([]).description('已弃用：宿主不再回写目录，卡片改从只读路由读取'),
@@ -280,6 +300,43 @@ export function apply(ctx: Context, config: Config): void {
   /** Live view over the plugin's own configuration section. */
   let current: () => Config = () => config
 
+  /**
+   * Say out loud how the stored `wps_sid` is protected, once per change.
+   *
+   * Two states deserve a line. A value written by an older version is still
+   * plaintext in a file the user may well share or commit — the card upgrades it,
+   * but a headless run never opens the card, so the log is the only place that can
+   * say so. A sealed value that cannot be opened (key file deleted, replaced, or
+   * copied from another machine) otherwise presents as a plain 401, which is the
+   * worst failure shape here: it looks like the upstream refusing a perfectly
+   * good sid.
+   */
+  let lastSidNote = ''
+  const reportSidStorage = async (): Promise<void> => {
+    let resolution: ComateSidResolution
+    try {
+      resolution = await store.resolveSid()
+    } catch (error: unknown) {
+      ctx.logger.warn('dsh-connect-comate: could not inspect the stored wps_sid', error)
+      return
+    }
+    const note = `${resolution.storage}:${resolution.problem ?? ''}`
+    if (note === lastSidNote) return
+    lastSidNote = note
+    if (resolution.storage === 'unreadable') {
+      ctx.logger.error(
+        `dsh-connect-comate: the stored wps_sid is sealed but cannot be decrypted (${resolution.problem});`
+        + ` the key file ${resolution.keyFile} is missing, unreadable, or was created for another machine/user.`
+        + ' Paste the sid again in the plugin card, or point WPS_COMATE_SECRET_KEY_FILE at the right key file.',
+      )
+    } else if (resolution.storage === 'plaintext') {
+      ctx.logger.warn(
+        'dsh-connect-comate: the stored wps_sid is still plaintext in the DSH settings document;'
+        + ' open the plugin card once (or run `dsh plugin exec dsh-connect-comate seal`) to store it sealed',
+      )
+    }
+  }
+
   /** Rebuild the runtime catalog from discovery plus the enabled-id set. */
   const republish = (): void => {
     const enabled = new Set(current().enabledModelIds ?? [])
@@ -298,6 +355,9 @@ export function apply(ctx: Context, config: Config): void {
     store.setWpsSid(next.wpsSid)
     store.setCookieOnly(next.cookieOnly === true)
     reportOutputCap(next.maxOutputTokens)
+    // Fire-and-forget: it only logs, and a settings change must not wait on file
+    // I/O (the key file may live on a slow or missing path).
+    void reportSidStorage()
     republish()
     if (next.configFile !== lastConfigFile) {
       lastConfigFile = next.configFile
@@ -380,11 +440,27 @@ export function apply(ctx: Context, config: Config): void {
     models: () => persistedCatalog,
     signedIn: () => signedIn,
     providerRegistered: () => providerRegistered,
+    // Reported host-side because the browser cannot tell a sealed value that
+    // opens from one whose key file is gone. Resolved live (a few ms of scrypt
+    // per catalog read) rather than cached: the card reads this right after a
+    // save, which is exactly when a cached answer would be stale.
+    sidState: async () => {
+      const resolved: ComateSidResolution = await store.resolveSid()
+      return resolved.problem === undefined
+        ? { storage: resolved.storage }
+        : { storage: resolved.storage, problem: resolved.problem }
+    },
   }, {
     // The same re-read the startup path uses, so a refresh can never diverge
     // from what a restart would have discovered.
     refresh: rediscover,
     check: checkConnection,
+    // Sealing is the store's job, not the route's: the store owns the key file
+    // and the sealing path, so the CLI (`seal`) and the card produce byte-identical
+    // envelopes for the same input.
+    seal: (input: ComateSealInput) => input.fromStored === true
+      ? store.sealStored()
+      : store.seal(input.sid ?? ''),
   })
 
   void shim.ready

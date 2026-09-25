@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0-rc.1 (2026-09-25)
+
+### Features
+
+- **`wps_sid` 不再以明文落盘，改为密文保存（`enc:v1:`）。** 之前这个凭据是以明文躺在 DSH profile 的 `cordis.patch.yml` 里的——那个文件会被同步、备份、进仓库、贴进 issue。现在它是一串密文，解开的钥匙在**另一个目录树**：密钥文件（默认 `~/.wpscomate/dsh-connect-comate/secret.key`，0600）加上**本机指纹**（平台 + 架构 + 主机名 + 用户名）经 scrypt 派生出 AES-256-GCM 的 key，密文里带随机 IV 与认证标签。所以「同步了 profile、没同步密钥」的结果是**读不出来并明确报错**，而不是静默用一个别人的凭据。
+
+  实现落在 `src/secret.ts`（新）：`sealSecret` / `openSecret`，信封格式 `enc:v1:` + base64url(IV ‖ tag ‖ 密文)；结构性错误（前缀对、载荷坏）报 `malformed`，环境性错误（密钥文件缺失/不可读/换了机器）报 `key-missing` / `key-unreadable` / `auth-failed`——**两者分开**，因为前者是「值坏了」，后者是「值好好的但你打不开」，用户要做的事完全不同。密钥文件首次使用时原子创建（`wx` + 临时文件重命名），文件权限按 POSIX 收紧到 0600。
+
+  `src/auth.ts` 的存储层相应分成四种状态而不是一个布尔：`unset` / `plaintext`（0.4 之前写的值，仍可读）/ `sealed` / `unreadable`。`plaintext` 是**升级路径**：旧值继续能用，卡片打开时自动就地升级；`unreadable` 是必须显式告诉用户的失败——把这两者都塌缩成「已设置」，就是「密钥文件坏了」变成「莫名其妙的 401」的原因。
+
+- **卡片里的 `wps_sid` 变成密码框：只显示圆点，且不可复制。** `type="password"` 只决定怎么画，浏览器照样允许复制、剪切、拖拽，所以 `onCopy` / `onCut` / `onDragStart` / `onContextMenu` 四个事件都被拦掉（`blockClipboard`）。`autoComplete="new-password"`（不是 `off`）才是真正让密码管理器不再提示保存、也不把已存的凭据自动填进来的写法。没有「显示明文」开关——这个值本来就不该被看第二眼。
+
+- **明文自动升级，且明文不进浏览器。** 卡片打开时若发现存的是明文，会走新增的宿主路由 `POST /plugins/dsh-connect-comate/__seal`（`{ fromStored: true }`）：**宿主把它自己手上已有的值加密**，只把密文回给卡片，卡片再通过普通的设置写入路径存下去。所以升级过程中明文一次都没有经过浏览器。失败会显示原因，并在状态行旁留一个可重试的按钮，而不是循环重试。
+
+- **卡片状态行能说出「密文在，但本机解不开」。** 这个判断浏览器做不了——密钥文件丢了之后的密文和健康的密文**逐字节一样**，光看字符串只能得出「已加密」。所以宿主的目录路由（`GET …/__catalog`）多带两个字段：`sidStorage`（四种状态之一）和 `sidProblem`（打不开的原因）。卡片优先信宿主，宿主没发话（老宿主、无 web 路由）才退回看字符串前缀——而这个方向的误差只会是「把密文说成未配置」，永远不会把明文说成密文。`unreadable` 在界面上是**警告**而不是「已配置」：凭据在，但用不了，不报的话用户第一次看到的就是上游莫名其妙的 401。
+
+- **CLI 加了 `seal` 子命令**，以及 `doctor` 的新字段 `wpsSidStorage` / `wpsSidProblem` / `wpsSidKeyFile`（是**路径**，永远不是密钥本身）。`doctor` 按状态给不同的 hint：明文→怎么升级；打不开→密钥文件在哪、用 `WPS_COMATE_SECRET_KEY_FILE` 指到正确的那个。
+
+### Notes
+
+- 加密是**对「文件被搬走」的防护，不是对「本机被攻破」的防护**：密钥文件就在同一个用户的 home 下，任何能以该用户身份执行代码的人都能解开。这是刻意的取舍——用 OS keychain 要引入原生依赖或平台 API，用主密码则要求每次无人值守运行前先解锁。README 里写明了这个边界，免得把它当成比实际更强的保证。
+- 换机器 / 换用户名 / 换密钥文件后，已存的值解不开（`auth-failed`）。重新粘贴一次即可；旧密文不会被覆盖成垃圾，`doctor` 会指认是哪个密钥文件对不上。
+- 环境变量 `WPS_COMATE_SID` 的值**不参与**升级：那是一次性的 shell 覆盖，不是用户要求持久化的凭据，把它加密写回设置文档等于擅自落盘。`sealStored` 在这种情况下明确拒绝。
+
+### Tests
+
+- 测试 214 → 255 例。新增 `tests/secret.spec.ts`（15 例）：信封往返、密文里不含明文、同一明文两次加密的密文不同（IV 随机）、**逐字节篡改载荷必然被 GCM 拒绝**（不是「解出来是乱码」而是抛错）、结构坏 vs 环境坏的分流、密钥文件权限与原子创建、指纹变化导致 `auth-failed`。
+- 新增 `tests/auth-rest.spec.ts`（14 例）：四种存储状态、明文兼容读、密封值往返进 cookie、**换了密钥文件后仍然返回配置里的 cookie 而不是整体失败**、密钥文件被删报 `key-missing` 且不会被重新创建、`sealStored` 的拒绝条件（已密封 / 只有 env）、密钥文件优先级（显式 > env > Comate home 默认）、`doctor` 各状态的 hint 与 `wpsSidProblem`。
+- `tests/catalog-route.spec.ts` 补 `__seal` 路由与存储状态下发（35 例）：成功只回密文、失败 500 而**不落明文**、失败信息里的 token-like 片段仍被 `safeMessage` 脱敏；以及目录路由带上 `sidStorage`/`sidProblem`（无 verdict 时字段**缺席**而非 `undefined`、没有凭据存储的部署两个字段都不出现、探测抛错时目录照常返回、refresh 路由共用同一个快照构造器）。
+
 ## 0.3.4-rc.1 (2026-09-25)
 
 ### Features
