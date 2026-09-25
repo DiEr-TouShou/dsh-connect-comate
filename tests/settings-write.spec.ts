@@ -179,6 +179,28 @@ describe('writeComateSettings', () => {
     await writeComateSettings(form, patch)
     expect(() => structuredClone(form.calls)).not.toThrow()
   })
+
+  it('keeps the stored sid when the patch omits it', async () => {
+    // The card never re-sends the saved sid (it does not even hold it in the
+    // draft), so a save of the other fields must not touch the credential —
+    // and must not fail the wpsSid read-back it never issued.
+    const form = fakeForm({ wpsSid: 'stored', cookieOnly: false, enabledModelIds: [] })
+    await expect(writeComateSettings(form, { cookieOnly: true, enabledModelIds: ['a'] })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly', 'enabledModelIds'])
+    expect(readComateValue(form).wpsSid).toBe('stored')
+  })
+
+  it('writes an explicit empty string when asked to clear the sid', async () => {
+    const form = fakeForm({ wpsSid: 'stored', cookieOnly: false, enabledModelIds: [] })
+    await expect(writeComateSettings(form, { wpsSid: '' })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['wpsSid'])
+    expect(readComateValue(form).wpsSid).toBe('')
+  })
+
+  it('does not flag not-persisted for a field the patch did not touch', async () => {
+    const form = fakeForm({}, { swallow: true })
+    await expect(writeComateSettings(form, { cookieOnly: false })).resolves.toBeUndefined()
+  })
 })
 
 describe('acquireComateSettingsForm', () => {

@@ -128,7 +128,13 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     const stored = new Set(saved.enabledModelIds ?? [])
     return stored.size === 0 ? new Set(catalogIds) : stored
   }, [saved.enabledModelIds, catalogIds])
-  const [draftSid, setDraftSid] = useState(savedSid)
+  // The stored sid is NEVER seeded into the draft: once a value is saved the
+  // input stays empty, so screenshots and shoulder-surfing cannot recover it.
+  // `null` means "nothing typed — keep the saved value" (the status line's
+  // saved length is the only trace the card keeps); a typed value replaces it
+  // on save, and Clear stages an explicit empty write via `clearPending`.
+  const [draftSid, setDraftSid] = useState<string | null>(null)
+  const [clearPending, setClearPending] = useState(false)
   const [draftCookieOnly, setDraftCookieOnly] = useState(savedCookieOnly)
   const [draftEnabled, setDraftEnabled] = useState<Set<string>>(savedEnabledIds)
   const [saving, setSaving] = useState(false)
@@ -224,7 +230,13 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     setTesting(true)
     setTestNote(undefined)
     try {
-      const outcome = await testComateConnection({ wpsSid: trimmedSid, cookieOnly: draftCookieOnly })
+      // Only an explicit sid intent is sent: a typed replacement is probed,
+      // while an empty draft falls back to the stored value on the host side
+      // (an empty override reads as "absent" in the credential store).
+      const outcome = await testComateConnection({
+        ...(sidReplace ? { wpsSid: trimmedSid } : {}),
+        cookieOnly: draftCookieOnly,
+      })
       if (!mounted.current) return
       setTestNote(describeOutcome(outcome, t))
     } catch (cause: unknown) {
@@ -254,15 +266,10 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   }, [savedConfigFile, loadCatalog])
 
   // External changes (another surface, first load) re-seed an untouched draft.
-  const prevSavedSid = useRef(savedSid)
+  // The sid draft is deliberately excluded: it never mirrors the stored value,
+  // so an external change has nothing to re-seed into it.
   const prevSavedCookieOnly = useRef(savedCookieOnly)
   const prevSavedEnabledKey = useRef('')
-  useEffect(() => {
-    if (prevSavedSid.current !== savedSid) {
-      setDraftSid(current => (current === prevSavedSid.current ? savedSid : current))
-      prevSavedSid.current = savedSid
-    }
-  }, [savedSid])
   useEffect(() => {
     if (prevSavedCookieOnly.current !== savedCookieOnly) {
       setDraftCookieOnly(current => (current === prevSavedCookieOnly.current ? savedCookieOnly : current))
@@ -285,10 +292,16 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const writable = comateSettingsWritable(settingsScope)
   const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
     a.size === b.size && [...a].every(id => b.has(id))
-  const dirty = draftSid !== savedSid
+  const trimmedSid = (draftSid ?? '').trim()
+  // The sid participates in "dirty" only on an explicit intent — a typed
+  // replacement, or a staged clear. An emptied field keeps the stored value:
+  // that is also what stops a save of the model checkboxes from silently
+  // wiping the credential when the user typed and erased something.
+  const sidReplace = draftSid !== null && trimmedSid.length > 0
+  const sidDirty = clearPending || sidReplace
+  const dirty = sidDirty
     || draftCookieOnly !== savedCookieOnly
     || !sameSet(draftEnabled, savedEnabledIds)
-  const trimmedSid = draftSid.trim()
 
   const toggleModel = (id: string): void => {
     setDraftEnabled(current => {
@@ -299,7 +312,8 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   }
 
   const discard = (): void => {
-    setDraftSid(savedSid)
+    setDraftSid(null)
+    setClearPending(false)
     setDraftCookieOnly(savedCookieOnly)
     setDraftEnabled(new Set(savedEnabledIds))
     setError(undefined)
@@ -326,11 +340,16 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         ? (saved.enabledModelIds ?? [])
         : (allSelected ? [] : catalogIds.filter(id => draftEnabled.has(id)))
       await writeComateSettings(settingsScope, {
-        wpsSid: trimmedSid,
+        // Only an explicit intent writes the sid: a staged clear sends '',
+        // a typed replacement sends the new value, an empty draft omits the
+        // field entirely so the stored value survives untouched.
+        ...(clearPending ? { wpsSid: '' } : sidReplace ? { wpsSid: trimmedSid } : {}),
         cookieOnly: draftCookieOnly,
         enabledModelIds,
       })
       if (!mounted.current) return
+      setDraftSid(null)
+      setClearPending(false)
       setSavedFlash(true)
       window.setTimeout(() => { if (mounted.current) setSavedFlash(false) }, 4000)
     } catch (cause: unknown) {
@@ -378,17 +397,38 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
               </div>
               <div className="dsm-comate-field">
                 <label className="dsm-comate-label" htmlFor="dsh-comate-wps-sid">{t('row.sidLabel')}</label>
-                <input
-                  id="dsh-comate-wps-sid"
-                  className="dsm-comate-input"
-                  type="text"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={t('row.sidPlaceholder')}
-                  value={draftSid}
-                  disabled={!writable || saving}
-                  onChange={event => { setDraftSid(event.currentTarget.value) }}
-                />
+                <div className="dsm-comate-sid-row">
+                  <input
+                    id="dsh-comate-wps-sid"
+                    className="dsm-comate-input"
+                    type="text"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    placeholder={clearPending
+                      ? t('row.sidClearPending')
+                      : sidConfigured
+                        ? t('row.sidPlaceholderSet')
+                        : t('row.sidPlaceholder')}
+                    value={draftSid ?? ''}
+                    disabled={!writable || saving || clearPending}
+                    onChange={event => { setDraftSid(event.currentTarget.value) }}
+                  />
+                  {/* Clearing is a staged intent like any other edit: it goes
+                      through Save (and Discard can undo it) instead of writing
+                      immediately from a click. */}
+                  {sidConfigured && writable && !clearPending
+                    ? (
+                        <button
+                          type="button"
+                          className="dsm-btn dsm-btn-outline"
+                          disabled={saving}
+                          onClick={() => { setClearPending(true); setDraftSid(null) }}
+                        >
+                          {t('row.clear')}
+                        </button>
+                      )
+                    : null}
+                </div>
                 <p className="dsm-comate-hint">{t('row.sidHint')}</p>
               </div>
               <label className="dsm-comate-check">
@@ -491,7 +531,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                 <button
                   type="button"
                   className="dsm-btn dsm-btn-primary"
-                  disabled={!writable || !dirty || saving || (trimmedSid.length > 0 && trimmedSid.startsWith('wps_sid='))}
+                  disabled={!writable || !dirty || saving || (sidReplace && trimmedSid.startsWith('wps_sid='))}
                   onClick={() => { void save() }}
                 >
                   {saving ? t('row.saving') : t('row.save')}

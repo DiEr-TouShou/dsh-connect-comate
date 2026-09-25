@@ -42,6 +42,9 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-input{width:100%;box-sizing:border-box;font:inherit;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:10px;color:var(--dsw-alias-label-primary,#e6e6e6);background:var(--dsw-alias-bg-layer-3,#2a2c33);transition:border-color .15s,box-shadow .15s}
 .dsm-comate-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary,#5686fe);box-shadow:0 0 0 3px rgba(86,134,254,.22)}
 .dsm-comate-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a8)}
+.dsm-comate-sid-row{display:flex;gap:8px;align-items:center}
+.dsm-comate-sid-row .dsm-comate-input{flex:1;min-width:0}
+.dsm-comate-sid-row .dsm-btn{flex:none;white-space:nowrap}
 .dsm-comate-check{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:19px;color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:pointer}
 .dsm-comate-check input{margin-top:3px}
 .dsm-comate-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;flex-wrap:wrap}

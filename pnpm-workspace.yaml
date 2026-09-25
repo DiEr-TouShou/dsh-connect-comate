@@ -1,5 +1,10 @@
 packages:
   - .
+# 两者都是 @earendil-works/pi-ai（宿主 peer，开发树里仅为 typecheck/测试而装）的
+# 传递依赖，其安装脚本与插件的构建、测试无关。false 维持 pnpm 的默认跳过行为。
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false
 # 0.1.7 线的每个包都把自己的兄弟包声明成精确 peer（`@deepseek-ai/dsh-invariants`
 # 就是 `0.1.7-rc.1`），而 pnpm 从 v8 起默认不安装缺失的 peer —— 结果是「直接依赖
 # 升到了 0.1.7，被依赖者仍解析到 0.1.5-rc.2」，开发树里同时躺着两条线的实现。

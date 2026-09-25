@@ -111,11 +111,15 @@ export class ComateSettingsWriteError extends Error {
   }
 }
 
-/** The three fields the card saves. */
+/** The fields the card may save; an omitted field keeps its stored value. */
 export interface ComateSettingsPatch {
-  wpsSid: string
-  cookieOnly: boolean
-  enabledModelIds: readonly string[]
+  /**
+   * The card never re-sends the stored sid: omitted keeps it, an explicit
+   * empty string clears it.
+   */
+  wpsSid?: string
+  cookieOnly?: boolean
+  enabledModelIds?: readonly string[]
 }
 
 /**
@@ -242,32 +246,38 @@ async function writeField(form: ComateSettingsForm, field: string, value: unknow
 }
 
 /**
- * Save the card's three fields, verifying that they actually landed.
+ * Save the card's fields, verifying that they actually landed.
  *
  * @param form - the settings form.
- * @param patch - the values to save.
+ * @param patch - the values to save; an omitted field is neither written nor
+ * verified, so the stored sid in particular survives a save untouched.
  * @throws {ComateSettingsWriteError} `refused` for a rejected write,
- * `not-persisted` when the value read back differs from what was written.
+ * `not-persisted` when a written value reads back different.
  */
 export async function writeComateSettings(
   form: ComateSettingsForm,
   patch: ComateSettingsPatch,
 ): Promise<void> {
-  await writeField(form, 'wpsSid', patch.wpsSid)
-  await writeField(form, 'cookieOnly', patch.cookieOnly)
+  if (patch.wpsSid !== undefined) await writeField(form, 'wpsSid', patch.wpsSid)
+  if (patch.cookieOnly !== undefined) await writeField(form, 'cookieOnly', patch.cookieOnly)
   // An all-selected list is normalized to `[]` by the caller, which the host
   // reads as "show every discovered model" and keeps the saved section compact.
-  await writeField(form, 'enabledModelIds', [...patch.enabledModelIds])
+  if (patch.enabledModelIds !== undefined) {
+    await writeField(form, 'enabledModelIds', [...patch.enabledModelIds])
+  }
 
   await afterWriteSettles()
   const saved = readComateValue(form)
-  if (saved.wpsSid !== patch.wpsSid) {
+  // Only written fields are verified. The card never receives the stored sid
+  // into any editable state, so a mismatch verdict on an omitted sid would be
+  // unactionable for the user.
+  if (patch.wpsSid !== undefined && saved.wpsSid !== patch.wpsSid) {
     throw new ComateSettingsWriteError('not-persisted', 'wpsSid', 'settings field "wpsSid" was not persisted')
   }
-  if ((saved.cookieOnly === true) !== patch.cookieOnly) {
+  if (patch.cookieOnly !== undefined && (saved.cookieOnly === true) !== patch.cookieOnly) {
     throw new ComateSettingsWriteError('not-persisted', 'cookieOnly', 'settings field "cookieOnly" was not persisted')
   }
-  if (!sameStringSet(saved.enabledModelIds ?? [], patch.enabledModelIds)) {
+  if (patch.enabledModelIds !== undefined && !sameStringSet(saved.enabledModelIds ?? [], patch.enabledModelIds)) {
     throw new ComateSettingsWriteError(
       'not-persisted',
       'enabledModelIds',
