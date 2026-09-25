@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1-rc.2 (2026-09-25)
+
+> 纯 **dev 改动**：真机验收脚本不再把本机用户名写进源码。
+> 已打 tag `v0.4.1-rc.2`；安装：`github:DiEr-TouShou/dsh-connect-comate#v0.4.1-rc.2`。未上 npm。
+>
+> 改的全在 `tests/` 与 `scripts/`（都不进 npm 包），`src/` 一字未动，所以**插件行为与
+> 0.4.1-rc.1 完全一致**——`lib/` 里唯一的 diff 是构建注入的版本号字符串。这一版的意义是
+> 「换台机器也能跑真机验收」：rc.1 那三个脚本换机必挂，挂法是 `ENOENT: C:\Users\ASUS\...`，
+> 看起来像插件坏了，其实只是脚本认路认死了。
+
+### Bug Fixes
+
+- **真机脚本把本机用户名写进了源码。** `C:/Users/ASUS/.dsh/profiles/desktop/cordis.patch.yml` 在仓库里躺了三份——`tests/max-tokens-live.spec.ts`、`tests/multimodal-live.spec.ts`、`scripts/verify-shim-live.mjs` 各一份（后两份是同一段 `readSid()` 的复制）。CI、同事的机器、另开一个 Windows 账户，都会在这里挂。
+
+  现在路径解析只有一份：`scripts/live-profile.mjs`（配 `live-profile.d.mts` 让 TS spec 也能 import），**零用户名字面量**。顺序：`WPS_COMATE_SID`（直接给 sid）> `WPS_COMATE_PROFILE_PATCH`（直接给 patch 绝对路径）> `DSH_PROFILE_DIR`（DSH 给 shell 调用注入的受信事实）> `<home>/.dsh/profiles/<DSH_PROFILE 或 desktop>/cordis.patch.yml` > 兜底扫 `profiles/<name>` 取第一个含 `wpsSid` 的（`desktop` 优先，跳过没有 `wpsSid` 的邻居 profile）。全不命中时抛错，并把**试过的每一个路径**和两条设置途径一起印出来，而不是丢一个裸 `ENOENT`。
+
+- **同一族的第二个问题：`USERPROFILE` 只有 Windows 有。** `verify-installed.mjs` / `verify-sid-cipher.mjs` 的默认插件目录用 `process.env['USERPROFILE'] ?? ''`，别的平台上会拼出一个**相对 cwd 的假路径**，报错也看不出是认路认错了。换成 `homedir()`。
+
+### Tests
+
+- 新增 `tests/live-profile.spec.ts` 8 例：用临时目录搭出各种 profile 布局把解析顺序钉死——env 优先、空白串当没设、引号会剥掉、`DSH_PROFILE_DIR` 指哪读哪、`DSH_PROFILE` 改名后仍找得到、兜底扫描跳过没有 `wpsSid` 的邻居、候选表去重且不含用户名字面量。其中一条专钉「**真 home 排在 `DSH_HOME` 前面**」：`vitest.config.ts` 把 `DSH_HOME` 指到临时目录，顺序反了真机套件就会去临时目录里找 sid。默认套件 280 → 288 例。
+- 真机复跑（换路径解析后凭据照样取得到）：`max-tokens-live` 2/2、`multimodal-live` 1/1（5 模型全答出左红右蓝）；`verify:shim` 1/1 PASS、`verify:installed` 5/5 OK、`verify:sid-cipher` ALL PASS。
+
 ## 0.4.1-rc.1 (2026-09-25)
 
 > 输出上限从「一个数管所有模型」变成**逐模型**：同一个路由上的模型各用各的上限。
