@@ -1,5 +1,6 @@
 /**
- * 卡片状态机验收：「启用的模型」的勾选状态（在 jsdom 里跑**真实构建产物** `lib/client.js`）。
+ * 卡片状态机验收：「启用的模型」的勾选状态 + 每模型输出上限（在 jsdom 里跑**真实构建产物**
+ * `lib/client.js`）。
  *
  * 为什么单开一个：卡片是跑在两个异步源上的状态机——设置快照（已保存的选择）和目录
  * 路由（要画的模型）。这两个源谁先到不确定，而「草稿什么时候该被重新播种、什么时候
@@ -41,29 +42,45 @@ const BUNDLE = pluginDir === undefined || pluginDir === ''
 const require_ = createRequire(import.meta.url)
 
 /** 解析 jsdom/react-dom：先 `DSH_COMATE_CARD_DEPS`（若给了），再本仓库的树。 */
-function loadDomDeps() {
+/** 解析依赖的目录：先 `DSH_COMATE_CARD_DEPS`（若给了），再本仓库的树。 */
+function requireRoots() {
   const override = process.env.DSH_COMATE_CARD_DEPS
-  const roots = override === undefined || override === ''
+  return override === undefined || override === ''
     ? [require_]
     : [createRequire(join(override, 'index.js')), require_]
+}
+
+function bail(lastError) {
+  console.error('需要 jsdom + react-dom（devDependencies）。')
+  console.error('先跑 `pnpm install`，或用 `DSH_COMATE_CARD_DEPS` 指到装好了它们的目录。')
+  console.error(`最后一次解析失败：${lastError instanceof Error ? lastError.message : String(lastError)}`)
+  process.exit(2)
+}
+
+/** 只加载 jsdom。React 得等 `window` 铺好之后再 require，原因见下面那段注释。 */
+function loadJsdom() {
   let lastError
-  for (const requireFrom of roots) {
+  for (const requireFrom of requireRoots()) {
     try {
-      return {
-        JSDOM: requireFrom('jsdom').JSDOM,
-        React: requireFrom('react'),
-        ReactDOMClient: requireFrom('react-dom/client'),
-        act: requireFrom('react-dom/test-utils').act,
-        requireFrom,
-      }
+      return { JSDOM: requireFrom('jsdom').JSDOM, requireFrom }
     } catch (error) {
       lastError = error
     }
   }
-  console.error('需要 jsdom + react-dom（devDependencies）。')
-  console.error('先跑 `pnpm install`，或用 DSH_COMATE_CARD_DEPS 指到装好了它们的目录。')
-  console.error(`最后一次解析失败：${lastError instanceof Error ? lastError.message : String(lastError)}`)
-  process.exit(2)
+  return bail(lastError)
+}
+
+/** React 三件套。必须在 `window` / `document` 就位之后调用。 */
+function loadReact(requireFrom) {
+  try {
+    return {
+      React: requireFrom('react'),
+      ReactDOMClient: requireFrom('react-dom/client'),
+      act: requireFrom('react-dom/test-utils').act,
+    }
+  } catch (error) {
+    return bail(error)
+  }
 }
 
 /** 断言计数与失败清单。 */
@@ -94,7 +111,7 @@ let catalogAnswer = () => ({ ok: true, models: CATALOG })
 // ---------------------------------------------------------------- jsdom + React
 // `requireFrom` 与 DOM 依赖同源，这样 bundle 自己那句 `require('react')` 拿到的就是
 // react-dom 渲染用的那一个 React 实例——两份 React 会让每个 hook 调用都失败。
-const { JSDOM, React, ReactDOMClient, act, requireFrom } = loadDomDeps()
+const { JSDOM, requireFrom } = loadJsdom()
 
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
   url: 'https://dsh.invalid/',
@@ -105,6 +122,15 @@ for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'Even
   try { globalThis[key] = window[key] } catch { /* 只读全局（navigator） */ }
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+// 这一句必须排在上面「铺全局」之后。react-dom 在**模块加载的那一刻**就用
+// `window` / `document` 判断自己是不是在浏览器里（内部的 `canUseDOM`），并据此挑
+// `<input>` 的监听事件：有 DOM 时听 `input`，没有时退化到老 IE 那套
+// `change` / `propertychange`。先 require、后铺全局，它就会以「无 DOM」启动——
+// 渲染和 `click()` 照样能用（所以勾选框那几条一直是绿的），但往输入框里敲字
+// （`input` 事件）永远没人接，草稿不动、保存按钮一直灰着。0.4.1 加每模型上限时
+// 就是这么踩的：真机上好好的，脚本里敲不进字。
+const { React, ReactDOMClient, act } = loadReact(requireFrom)
 
 globalThis.fetch = async (url) => {
   const href = String(url)
@@ -188,6 +214,10 @@ function registerCard(form) {
           'row.maxTokensLabel': 'cap',
           'row.maxTokensUnit': 'tokens',
           'row.maxTokensHint': 'hint',
+          'row.modelCapTitle': 'title',
+          'row.modelCapHint': '每个模型可以单独设上限：留空跟随上面的默认值（{global}）；0 表示这个模型不限制。',
+          'row.modelCapInvalid': '有模型的输出上限填写不合法：请填 0 或正整数。',
+          'row.modelCapAria': 'aria',
           'row.modelsTitle': '启用的模型',
           'row.selectAll': '全选',
           'row.selectNone': '全不选',
@@ -226,6 +256,33 @@ async function open({ stored, readyDelay = 0, catalog = () => ({ ok: true, model
   })
   await act(async () => { await tick(readyDelay + 30) })
   return { container, host, client, component }
+}
+
+/** 每个模型的输出上限输入框，按列表顺序。 */
+const capInputs = (container) => [...container.querySelectorAll('.dsm-comate-model-cap input')]
+/** 每模型上限那条提示（列表下方最后一行 hint）。 */
+const capHint = (container) =>
+  [...container.querySelectorAll('.dsm-comate-models .dsm-comate-hint')].at(-1)?.textContent ?? ''
+/** 每模型上限输入框里现在显示的值。 */
+const capValues = (container) => capInputs(container).map(input => input.value)
+/** 每模型上限输入框的占位符（= 全局默认值）。 */
+const capPlaceholders = (container) => capInputs(container).map(input => input.placeholder)
+/** 保存按钮的 disabled。 */
+const saveDisabled = (container) => buttonByText(container, '保存').disabled
+
+/**
+ * 像用户那样敲字：走原生 value setter + `input` 事件。
+ *
+ * 直接改 `input.value` 不会触发 React 的 onChange（React 记着自己上次设的值，
+ * 发现没变就跳过），所以在受控输入上必须走原生 setter 这条路——这是 React 测试
+ * 里唯一能真实驱动 onChange 的写法。
+ */
+async function typeInto(input, text) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  await act(async () => {
+    setter.call(input, text)
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  })
 }
 
 /** 用户看到的东西：按列表顺序的每个勾选框状态。 */
@@ -315,9 +372,108 @@ console.log('\n5. 外部改动只重新播种「没被碰过」的草稿')
   expectEqual('碰过的草稿保留', checked(container), [true, true, false, false, true])
 }
 
+console.log('\n6. 每个模型一格上限，空着 = 跟随全局默认值')
+{
+  const { container } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  expectEqual('每个模型一个输入框', capInputs(container).length, CATALOG.length)
+  expectEqual('默认全空（都跟随全局）', capValues(container), ['', '', '', '', ''])
+  expectEqual('占位符 = 全局默认值', capPlaceholders(container), ['32000', '32000', '32000', '32000', '32000'])
+  expectEqual('提示行', capHint(container),
+    '每个模型可以单独设上限：留空跟随上面的默认值（32000）；0 表示这个模型不限制。')
+  expectEqual('没改过时保存是禁用的', saveDisabled(container), true)
+}
+
+console.log('\n7. 给一个模型设上限、保存、退出、再进来')
+{
+  const first = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await typeInto(capInputs(first.container)[0], '4096')
+  expectEqual('敲完就能保存', saveDisabled(first.container), false)
+  await act(async () => { buttonByText(first.container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('只写了这一个模型', first.host.stored.maxOutputTokensByModel, { [IDS[0]]: 4096 })
+  expectEqual('全局默认值没被动过', first.host.stored.maxOutputTokens, 32000)
+
+  const second = await open({ stored: { ...first.host.stored } })
+  expectEqual('再进来', capValues(second.container), ['4096', '', '', '', ''])
+  expectEqual('其余仍跟随全局', capPlaceholders(second.container), ['32000', '32000', '32000', '32000', '32000'])
+}
+
+console.log('\n8. 0 是「这个模型不限制」，要原样落盘')
+{
+  const { container, host } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await typeInto(capInputs(container)[1], '0')
+  await act(async () => { buttonByText(container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('0 没有被当成空值吃掉', host.stored.maxOutputTokensByModel, { [IDS[1]]: 0 })
+}
+
+console.log('\n9. 清空一格 = 删掉这条覆盖（整张表重写）')
+{
+  const { container, host } = await open({
+    stored: {
+      wpsSid: 'enc:v1:x',
+      cookieOnly: false,
+      enabledModelIds: [],
+      maxOutputTokens: 32000,
+      maxOutputTokensByModel: { [IDS[0]]: 4096, [IDS[1]]: 0 },
+    },
+  })
+  expectEqual('两格都读出来了', capValues(container), ['4096', '0', '', '', ''])
+  await typeInto(capInputs(container)[0], '')
+  expectEqual('清空后仍可保存', saveDisabled(container), false)
+  await act(async () => { buttonByText(container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('被清掉的那条真的没了', host.stored.maxOutputTokensByModel, { [IDS[1]]: 0 })
+}
+
+console.log('\n10. 填了不是上限的东西就不让保存')
+{
+  const { container } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await typeInto(capInputs(container)[2], '1.5')
+  expectEqual('提示换成不合法', capHint(container), '有模型的输出上限填写不合法：请填 0 或正整数。')
+  expectEqual('保存被禁用', saveDisabled(container), true)
+  await typeInto(capInputs(container)[2], '512')
+  expectEqual('改回合法值后提示复原', capHint(container),
+    '每个模型可以单独设上限：留空跟随上面的默认值（32000）；0 表示这个模型不限制。')
+  expectEqual('保存重新可用', saveDisabled(container), false)
+}
+
+console.log('\n11. 外部改动只重新播种「没被碰过」的每模型草稿')
+{
+  const { container, host } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await act(async () => { host.external('maxOutputTokensByModel', { [IDS[0]]: 1024 }) })
+  await act(async () => { await tick(10) })
+  expectEqual('没碰过的草稿跟着变', capValues(container), ['1024', '', '', '', ''])
+
+  await act(async () => { host.external('maxOutputTokens', 64000) })
+  await act(async () => { await tick(10) })
+  expectEqual('占位符跟着全局默认值变', capPlaceholders(container), ['64000', '64000', '64000', '64000', '64000'])
+
+  await typeInto(capInputs(container)[3], '2048')
+  await act(async () => { host.external('maxOutputTokensByModel', { [IDS[0]]: 1024, [IDS[1]]: 512 }) })
+  await act(async () => { await tick(10) })
+  expectEqual('碰过的草稿保留', capValues(container), ['1024', '', '', '2048', ''])
+}
+
+console.log('\n12. 撤销修改把每模型草稿一起还原')
+{
+  const { container } = await open({
+    stored: {
+      wpsSid: 'enc:v1:x',
+      cookieOnly: false,
+      enabledModelIds: [],
+      maxOutputTokens: 32000,
+      maxOutputTokensByModel: { [IDS[0]]: 4096 },
+    },
+  })
+  await typeInto(capInputs(container)[1], '512')
+  await act(async () => { buttonByText(container, '撤销修改').click() })
+  expectEqual('回到已存的样子', capValues(container), ['4096', '', '', '', ''])
+}
+
 console.log(`\n${checks - failures.length}/${checks} 条断言通过`)
 if (failures.length > 0) {
   console.error(`\n失败：\n   - ${failures.join('\n   - ')}\n`)
   process.exit(1)
 }
-console.log('卡片勾选状态机：OK\n')
+console.log('卡片状态机（勾选 + 每模型上限）：OK\n')
