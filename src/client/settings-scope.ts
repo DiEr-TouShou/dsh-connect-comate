@@ -120,6 +120,8 @@ export interface ComateSettingsPatch {
   wpsSid?: string
   cookieOnly?: boolean
   enabledModelIds?: readonly string[]
+  /** Output-token cap: positive integer, or 0 for "no cap". */
+  maxOutputTokens?: number
 }
 
 /**
@@ -211,6 +213,13 @@ export function readComateValue(form: ComateSettingsForm | undefined): ComateSet
   if (typeof cookieOnly === 'boolean') value.cookieOnly = cookieOnly
   const enabled = unwrapVolatile(section.enabledModelIds)
   if (Array.isArray(enabled)) value.enabledModelIds = enabled.filter((id): id is string => typeof id === 'string')
+  // The cap is a plain number, so unlike the fields above a bare `typeof` check
+  // is enough — but a corrupt section (a string, a negative, a fraction) must
+  // read as "unset" rather than reach the save path as a bogus value.
+  const maxOutputTokens = unwrapVolatile(section.maxOutputTokens)
+  if (typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens >= 0) {
+    value.maxOutputTokens = maxOutputTokens
+  }
   return value
 }
 
@@ -265,6 +274,9 @@ export async function writeComateSettings(
   if (patch.enabledModelIds !== undefined) {
     await writeField(form, 'enabledModelIds', [...patch.enabledModelIds])
   }
+  if (patch.maxOutputTokens !== undefined) {
+    await writeField(form, 'maxOutputTokens', patch.maxOutputTokens)
+  }
 
   await afterWriteSettles()
   const saved = readComateValue(form)
@@ -282,6 +294,13 @@ export async function writeComateSettings(
       'not-persisted',
       'enabledModelIds',
       'settings field "enabledModelIds" was not persisted',
+    )
+  }
+  if (patch.maxOutputTokens !== undefined && saved.maxOutputTokens !== patch.maxOutputTokens) {
+    throw new ComateSettingsWriteError(
+      'not-persisted',
+      'maxOutputTokens',
+      'settings field "maxOutputTokens" was not persisted',
     )
   }
 }

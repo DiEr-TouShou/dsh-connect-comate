@@ -83,6 +83,23 @@ export interface ComatePersistedModel {
 }
 
 /**
+ * Default output-token cap for every model on this route.
+ *
+ * The Comate config exposes no max-output field for any of its models (verified:
+ * `~/.wpscomate/config.json` and the desktop client's `agent/models.json` carry
+ * only `context_window` / `id` / `llm_types` / `model_source` / `model_tier` /
+ * `name`), so this is this plugin's own default rather than a mirror of anything
+ * upstream.
+ *
+ * Declared here, not in `auth.ts`, because **both halves** need the number: the
+ * host resolves the effective cap from it (`max-tokens.ts`), and the card seeds
+ * its input field with it. `auth.ts` imports `node:crypto`, so a browser-half
+ * import from there would drag that into the client bundle — and this module is
+ * the node-free vocabulary the two halves already share.
+ */
+export const COMATE_DEFAULT_MAX_TOKENS = 32_000
+
+/**
  * The settings section the card edits, as the browser mirror delivers it.
  * Every field except `configFile` is declared volatile on the host schema, so on
  * 0.1.7 each one may arrive wrapped in a live reference — read it through
@@ -96,6 +113,8 @@ export interface ComateSettingsValue {
   wpsSid?: string
   cookieOnly?: boolean
   enabledModelIds?: string[]
+  /** Output-token cap: positive integer, or 0 for "no cap". */
+  maxOutputTokens?: number
 }
 
 /**

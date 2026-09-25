@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.4-rc.1 (2026-09-25)
+
+### Features
+
+- **输出 token 上限变成可配置的**（之前是写死的 32000，且**根本没发到上游**）。卡片新增「输出 token 上限」输入框：正整数为每个回答的上限，`0` 表示不限制（交给上游），留空/非法值则禁用保存并提示——不会把默认值偷偷写回去。改完保存即生效，无需重启。
+
+  实现落在 `src/max-tokens.ts`（新）：解析与优先级（`WPS_COMATE_MAX_TOKENS` > 设置里的 `maxOutputTokens` > 默认 32000），非法值当作「没写」并留痕供调用方打日志；`0` 是一条独立的语义（不是「空」）。宿主侧把结果接到 `RouteCatalog.configuredMaxTokens`，即 harness 真正会读、并物化成请求 `max_tokens` 的那条缝；同时在 pi-ai 的 compat 里**显式声明 `maxTokensField: 'max_tokens'`**。
+
+  为什么之前那个 32000 不起作用（已核过代码）：pi-ai 只在 per-call `options.maxTokens` 存在时才写该字段，而该值来自 harness 的 `defaultMaxTokens` ← `configuredMaxTokens`，此前传的是**空 Map**；描述符上的 `maxTokens` 只被当作思考预算的 ceiling。所以旧状态的 32000 只影响 UI 容量页占位与压缩预留，请求里连字段都没有。
+
+### Tests
+
+- 测试 185 → 214 例（+1 例真机验收，默认跳过）。新增 `tests/max-tokens.spec.ts`（23 例）：解析规则（含 `0` vs 空串、负数/小数/超界/非数字、env 覆盖与留痕）与**接线**——刻意用真的 `PiAiAdapter` 走 `resolveModel()` 断言 `defaultMaxTokens`，因为那是 harness 唯一会读的字段名，断言我们自己的中间对象证明不了任何事。`tests/settings-write.spec.ts` 补 6 例：上限的写入顺序、显式 `0` 不被当作清空、静默回退会被 `not-persisted` 抓住、未改动的字段不被重置、以及坏值不会被送进 schema。
+- 新增 `tests/max-tokens-live.spec.ts`（`WPS_COMATE_LIVE=1` 门控）：真适配器 → 真 shim（HTTP 回环）→ 真网关，只包一层上游客户端以读取转出去的 body。断言 `max_tokens` 这个**字段名**（声明错了的表现是「请求成功、上限无效」，纯单测看不出来）、上游真的截断（`finish.reason.kind === 'max-tokens'`）、以及 `0` 时字段根本不出现且同一题面能真的数到 100 以上。
+- 真机验收（2026-09-25，`WPS_COMATE_LIVE=1 npx vitest run tests/max-tokens-live.spec.ts`）：**PASS**。`max_tokens: 16` 出现在出站 body、无 `max_completion_tokens`、`reason=max-tokens`；`0` 时 body 里无该字段、`reason=stop`、正文数过 100。
+
+### Docs
+
+- README：卡片说明补「输出 token 上限」；环境变量表补 `WPS_COMATE_MAX_TOKENS`；Config 表补 `maxOutputTokens`；volatile 字段清单从三个改成四个。
+
 ## 0.3.3-rc.2 (2026-09-25)
 
 > 相对 0.3.3-rc.1 **无代码改动**，只改仓库元数据。`v0.3.3-rc.1` 已经推送到公开仓库，选择不去改写已发布的 tag，另起一个号。

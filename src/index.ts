@@ -27,9 +27,10 @@ import z from '@deepseek-ai/schemastery'
 import { COMATE_PROVIDER, comateModelInput, createComateAdapter } from './adapter.ts'
 import { ComatePresignUploader } from './assets.ts'
 import type { ComateModel } from './auth.ts'
-import { ComateCredentialStore } from './auth.ts'
+import { COMATE_DEFAULT_MAX_TOKENS, ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
 import { runComateCheck, type ComateCheckOutcome } from './check.ts'
+import { COMATE_MAX_TOKENS_ENV, resolveMaxOutputTokens } from './max-tokens.ts'
 import { createComateShim } from './shim.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import {
@@ -119,6 +120,16 @@ export {
   type ImageUploadStats,
 } from './multimodal.ts'
 export { COMATE_CONNECT_VERSION } from './version.ts'
+export {
+  COMATE_MAX_TOKENS_ENV,
+  COMATE_UNLIMITED_MAX_TOKENS,
+  comateConfiguredMaxTokens,
+  comateModelMaxTokens,
+  parseMaxOutputTokens,
+  resolveMaxOutputTokens,
+  type ComateMaxTokensResolution,
+  type ComateMaxTokensSource,
+} from './max-tokens.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-connect-comate'
@@ -153,6 +164,20 @@ export interface Config {
    * registered into DSH's model list.
    */
   enabledModelIds?: string[]
+  /**
+   * Output-token cap for every request on this route: a positive integer, or
+   * `0` for "no cap at all" (the upstream then decides).
+   *
+   * Defaults to 32000, and unlike the old hard-coded descriptor value this one
+   * is **enforced**: it lands in the pi-ai profile's `configuredMaxTokens`, which
+   * the harness materializes into a request that names no cap of its own. So `0`
+   * genuinely restores the uncapped behaviour this plugin had before.
+   *
+   * `WPS_COMATE_MAX_TOKENS` overrides this field when set (deliberate: headless
+   * runs and the live verification scripts must be able to force a value over
+   * whatever the card saved).
+   */
+  maxOutputTokens?: number
 }
 
 const persistedModelConfig = z.object({
@@ -176,6 +201,9 @@ export const Config: z<Config> = z.object({
   cookieOnly: asVolatile(z.boolean().description('只使用 Cookie 鉴权（不发送 Authorization 头）；上游报 API 密钥无效时开启')),
   lastCatalog: z.array(persistedModelConfig).default([]).description('已弃用：宿主不再回写目录，卡片改从只读路由读取'),
   enabledModelIds: asVolatile(z.array(z.string()).default([]).description('勾选启用的模型 id；留空表示全部启用')),
+  maxOutputTokens: asVolatile(z.number().step(1).min(0).default(COMATE_DEFAULT_MAX_TOKENS).description(
+    '输出 token 上限：正整数为上限，0 表示不设上限（由上游决定）；环境变量 WPS_COMATE_MAX_TOKENS 存在时优先生效',
+  )),
 })
 
 /** Convert a discovered Comate model into the card-facing shape. */
@@ -200,6 +228,14 @@ export function apply(ctx: Context, config: Config): void {
   const uploader = new ComatePresignUploader()
   const shim = createComateShim({ store, client, catalog, uploader, logger: ctx.logger })
 
+  /**
+   * Live read of the configured output cap (`0` = no cap).
+   *
+   * Read per call rather than captured, so a saved card value applies to the
+   * next request. Precedence and the `0` spelling live in `max-tokens.ts`.
+   */
+  const outputCap = (): number => resolveMaxOutputTokens(current().maxOutputTokens).value
+
   let stopped = false
   ctx.effect(() => () => { stopped = true })
 
@@ -210,6 +246,36 @@ export function apply(ctx: Context, config: Config): void {
   let invalidateCatalog = (): void => {}
   let lastConfigFile = config.configFile
   let warnedNoAttachments = false
+
+  /**
+   * Say out loud which output cap is in force, once per change.
+   *
+   * Two cases deserve a line: a value that was set but unusable (otherwise a
+   * mistyped `WPS_COMATE_MAX_TOKENS` would silently do nothing), and an env value
+   * overriding a differing saved card value (otherwise the card would look
+   * broken). An ordinary save, or the plain default, logs nothing.
+   */
+  let lastCapNote = ''
+  const reportOutputCap = (configValue: unknown): void => {
+    const resolution = resolveMaxOutputTokens(configValue)
+    // What the settings field says, env ignored: only needed to spot an override.
+    const saved = resolveMaxOutputTokens(configValue, {}).value
+    const note = `${resolution.source}:${resolution.value}:${String(saved)}:${resolution.ignored === undefined ? '' : 'ignored'}`
+    if (note === lastCapNote) return
+    lastCapNote = note
+    if (resolution.ignored !== undefined) {
+      ctx.logger.warn(
+        `dsh-connect-comate: ignoring the unusable ${COMATE_MAX_TOKENS_ENV} value`
+        + ` (${JSON.stringify(resolution.ignored.raw)}); the output cap falls back to the settings field`,
+      )
+    }
+    if (resolution.source === 'env' && saved !== resolution.value) {
+      ctx.logger.warn(
+        `dsh-connect-comate: ${COMATE_MAX_TOKENS_ENV} overrides the saved output cap`
+        + ` (${resolution.value} instead of ${saved}; 0 means no cap)`,
+      )
+    }
+  }
 
   /** Live view over the plugin's own configuration section. */
   let current: () => Config = () => config
@@ -231,6 +297,7 @@ export function apply(ctx: Context, config: Config): void {
     store.setConfigFile(next.configFile)
     store.setWpsSid(next.wpsSid)
     store.setCookieOnly(next.cookieOnly === true)
+    reportOutputCap(next.maxOutputTokens)
     republish()
     if (next.configFile !== lastConfigFile) {
       lastConfigFile = next.configFile
@@ -329,6 +396,11 @@ export function apply(ctx: Context, config: Config): void {
         const comate = createComateAdapter({
           shim,
           catalog,
+          // The output cap is the one request knob this route owns; read live so
+          // a saved card value applies without a restart. `invalidate()` is still
+          // required when it changes: the profile's `configuredMaxTokens` — what
+          // the harness turns into the request's `max_tokens` — is rebuilt there.
+          maxOutputTokens: outputCap,
           // The durable attachment service is a HOST service: it owns the
           // stored bytes of every image the user attached, and pi-ai's context
           // builder reads them through it and nowhere else. An image whose

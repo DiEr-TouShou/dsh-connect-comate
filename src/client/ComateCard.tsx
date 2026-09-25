@@ -1,7 +1,7 @@
 /**
  * Comate connection card contributed to DSH's plugin configuration:
- * a wps_sid input, a cookie-only toggle, a model-selection list, and
- * save/discard actions.
+ * a wps_sid input, a cookie-only toggle, an output-token cap, a model-selection
+ * list, and save/discard actions.
  *
  * 卡片外壳形态参考 dingminhua/dsh-connect-workbuddy（MIT）。
  *
@@ -17,7 +17,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { COMATE_CATALOG_PATH, type ComateCheckOutcome, type ComatePersistedModel } from '../bridge.ts'
+import { COMATE_CATALOG_PATH, COMATE_DEFAULT_MAX_TOKENS, type ComateCheckOutcome, type ComatePersistedModel } from '../bridge.ts'
+import { parseMaxOutputTokens } from '../max-tokens.ts'
 import { COMATE_PLUGIN_ICON } from './icon.ts'
 import { COMATE_CARD_CSS } from './styles.ts'
 import type { ComateSettingsKey } from './locales.ts'
@@ -120,6 +121,9 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const savedSid = saved.wpsSid ?? ''
   const savedCookieOnly = saved.cookieOnly === true
   const savedConfigFile = saved.configFile ?? ''
+  // An unset cap means the plugin default is in force; the input shows that
+  // number rather than an empty box, because the field always has an effect.
+  const savedMaxTokens = saved.maxOutputTokens ?? COMATE_DEFAULT_MAX_TOKENS
   const [catalog, setCatalog] = useState<ComatePersistedModel[]>([])
   const [catalogFailed, setCatalogFailed] = useState(false)
   const catalogIds = useMemo(() => catalog.map(model => model.id), [catalog])
@@ -137,6 +141,9 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const [clearPending, setClearPending] = useState(false)
   const [draftCookieOnly, setDraftCookieOnly] = useState(savedCookieOnly)
   const [draftEnabled, setDraftEnabled] = useState<Set<string>>(savedEnabledIds)
+  // A text draft, not a number: the user must be able to clear the field and
+  // retype without React fighting them for a value the parser would reject.
+  const [draftMaxTokens, setDraftMaxTokens] = useState(String(savedMaxTokens))
   const [saving, setSaving] = useState(false)
   const [savedFlash, setSavedFlash] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -270,12 +277,23 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // so an external change has nothing to re-seed into it.
   const prevSavedCookieOnly = useRef(savedCookieOnly)
   const prevSavedEnabledKey = useRef('')
+  const prevSavedMaxTokens = useRef(savedMaxTokens)
   useEffect(() => {
     if (prevSavedCookieOnly.current !== savedCookieOnly) {
       setDraftCookieOnly(current => (current === prevSavedCookieOnly.current ? savedCookieOnly : current))
       prevSavedCookieOnly.current = savedCookieOnly
     }
   }, [savedCookieOnly])
+  // Same treatment as the cookie toggle: the cap is not a secret, so a draft the
+  // user has not touched follows a value changed from another surface.
+  useEffect(() => {
+    if (prevSavedMaxTokens.current !== savedMaxTokens) {
+      setDraftMaxTokens(current => (
+        current === String(prevSavedMaxTokens.current) ? String(savedMaxTokens) : current
+      ))
+      prevSavedMaxTokens.current = savedMaxTokens
+    }
+  }, [savedMaxTokens])
   // The directory arrives asynchronously, so this key changes from the empty set
   // to "everything discovered" once the fetch lands — which re-seeds a draft the
   // user has not touched yet.
@@ -299,8 +317,15 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // wiping the credential when the user typed and erased something.
   const sidReplace = draftSid !== null && trimmedSid.length > 0
   const sidDirty = clearPending || sidReplace
+  // `undefined` means the box holds something that is not a cap at all: an empty
+  // box, a fraction, a negative, a word. Save stays disabled on it rather than
+  // silently writing the default behind the user's back.
+  const draftMaxTokensValue = parseMaxOutputTokens(draftMaxTokens)
+  const maxTokensInvalid = draftMaxTokensValue === undefined
+  const maxTokensDirty = draftMaxTokens.trim() !== String(savedMaxTokens)
   const dirty = sidDirty
     || draftCookieOnly !== savedCookieOnly
+    || maxTokensDirty
     || !sameSet(draftEnabled, savedEnabledIds)
 
   const toggleModel = (id: string): void => {
@@ -316,6 +341,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     setClearPending(false)
     setDraftCookieOnly(savedCookieOnly)
     setDraftEnabled(new Set(savedEnabledIds))
+    setDraftMaxTokens(String(savedMaxTokens))
     setError(undefined)
   }
 
@@ -346,6 +372,10 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         ...(clearPending ? { wpsSid: '' } : sidReplace ? { wpsSid: trimmedSid } : {}),
         cookieOnly: draftCookieOnly,
         enabledModelIds,
+        // Only a usable draft is written: an invalid box keeps Save disabled, so
+        // this branch is about the untouched-but-unparsable edge (a value stored
+        // by hand that this card cannot round-trip) rather than normal use.
+        ...(draftMaxTokensValue === undefined ? {} : { maxOutputTokens: draftMaxTokensValue }),
       })
       if (!mounted.current) return
       setDraftSid(null)
@@ -440,6 +470,29 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                 />
                 <span>{t('row.cookieOnly')}</span>
               </label>
+              <div className="dsm-comate-field">
+                <label className="dsm-comate-label" htmlFor="dsh-comate-max-tokens">{t('row.maxTokensLabel')}</label>
+                <div className="dsm-comate-number-row">
+                  <input
+                    id="dsh-comate-max-tokens"
+                    className="dsm-comate-input dsm-comate-input-number"
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    step={1}
+                    spellCheck={false}
+                    placeholder={String(COMATE_DEFAULT_MAX_TOKENS)}
+                    value={draftMaxTokens}
+                    disabled={!writable || saving}
+                    aria-invalid={maxTokensInvalid}
+                    onChange={event => { setDraftMaxTokens(event.currentTarget.value) }}
+                  />
+                  <span className="dsm-comate-unit">{t('row.maxTokensUnit')}</span>
+                </div>
+                <p className={`dsm-comate-hint${maxTokensInvalid ? ' dsm-comate-hint-error' : ''}`}>
+                  {maxTokensInvalid ? t('row.maxTokensInvalid') : t('row.maxTokensHint')}
+                </p>
+              </div>
               <section className="dsm-comate-models">
                 <div className="dsm-comate-models-head">
                   <h3 className="dsm-comate-models-title">{t('row.modelsTitle')}</h3>
@@ -531,7 +584,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                 <button
                   type="button"
                   className="dsm-btn dsm-btn-primary"
-                  disabled={!writable || !dirty || saving || (sidReplace && trimmedSid.startsWith('wps_sid='))}
+                  disabled={!writable || !dirty || saving || maxTokensInvalid || (sidReplace && trimmedSid.startsWith('wps_sid='))}
                   onClick={() => { void save() }}
                 >
                   {saving ? t('row.saving') : t('row.save')}

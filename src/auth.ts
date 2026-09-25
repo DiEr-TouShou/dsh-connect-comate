@@ -53,8 +53,13 @@ export const COMATE_MULTIMODAL_TYPE = 'llm-multimodal'
 /** The chat marker every catalogued model carries. */
 export const COMATE_CHAT_TYPE = 'llm-chat'
 
-/** Default DSH output budget; the Comate config exposes no max-output field. */
-export const COMATE_DEFAULT_MAX_TOKENS = 32_000
+/**
+ * Default DSH output budget; the Comate config exposes no max-output field.
+ *
+ * Re-exported from `bridge.ts` so the browser half can use the same number
+ * without importing this module (which pulls in `node:crypto`).
+ */
+export { COMATE_DEFAULT_MAX_TOKENS } from './bridge.ts'
 
 /** One model entry from the Comate config. */
 export interface ComateModel {

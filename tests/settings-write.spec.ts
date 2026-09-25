@@ -50,6 +50,7 @@ function fakeForm(initial: Record<string, unknown>, options: FormOptions = {}): 
             wpsSid: live(stored.wpsSid),
             cookieOnly: live(stored.cookieOnly),
             enabledModelIds: live(stored.enabledModelIds),
+            maxOutputTokens: live(stored.maxOutputTokens),
           }
       return { status: 'ready', writable: options.writable ?? true, value }
     },
@@ -77,6 +78,20 @@ describe('readComateValue', () => {
   it('drops fields carrying the wrong type', () => {
     const form = fakeForm({ wpsSid: 42, cookieOnly: 'yes', enabledModelIds: ['a', 7] }, { liveRefs: false })
     expect(readComateValue(form)).toEqual({ enabledModelIds: ['a'] })
+  })
+
+  it('reads the output cap, 0 included', () => {
+    // 0 是「不设上限」，必须原样读回来——丢掉它就等于用户没法表达「不限」。
+    expect(readComateValue(fakeForm({ maxOutputTokens: 4096 })).maxOutputTokens).toBe(4096)
+    expect(readComateValue(fakeForm({ maxOutputTokens: 0 })).maxOutputTokens).toBe(0)
+  })
+
+  it('drops a corrupt output cap rather than passing it to the save path', () => {
+    // 一个被手改坏的 profile 不该把 `"32000"` / `-1` / `1.5` 送进 schema。
+    for (const bad of ['32000', -1, 1.5, Number.NaN, null, true]) {
+      expect(readComateValue(fakeForm({ maxOutputTokens: bad })).maxOutputTokens, `value=${String(bad)}`)
+        .toBeUndefined()
+    }
   })
 
   it('returns an empty section when there is no form or no value', () => {
@@ -200,6 +215,39 @@ describe('writeComateSettings', () => {
   it('does not flag not-persisted for a field the patch did not touch', async () => {
     const form = fakeForm({}, { swallow: true })
     await expect(writeComateSettings(form, { cookieOnly: false })).resolves.toBeUndefined()
+  })
+
+  it('writes the output cap after the selection, and verifies it', async () => {
+    const form = fakeForm({})
+    await expect(writeComateSettings(form, { ...patch, maxOutputTokens: 4096 })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field))
+      .toEqual(['wpsSid', 'cookieOnly', 'enabledModelIds', 'maxOutputTokens'])
+    expect(readComateValue(form).maxOutputTokens).toBe(4096)
+  })
+
+  it('writes an explicit 0, the "no cap" spelling', async () => {
+    // 0 不能被当成「空值/清空」而跳过写入：它是本插件唯一能表达「不设上限」的值。
+    const form = fakeForm({ maxOutputTokens: 4096 })
+    await expect(writeComateSettings(form, { maxOutputTokens: 0 })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['maxOutputTokens', 0]])
+    expect(readComateValue(form).maxOutputTokens).toBe(0)
+  })
+
+  it('raises not-persisted when the cap came back different', async () => {
+    const form = fakeForm({}, { swallow: true })
+    form.put({ maxOutputTokens: 4096 })
+    const failure = await writeComateSettings(form, { maxOutputTokens: 32000 })
+      .catch((error: unknown) => error)
+    expect((failure as ComateSettingsWriteError).code).toBe('not-persisted')
+    expect((failure as ComateSettingsWriteError).field).toBe('maxOutputTokens')
+  })
+
+  it('leaves the stored cap alone when the patch omits it', async () => {
+    // 卡片不重发没改过的字段；保存其他项不能把上限重置成默认值。
+    const form = fakeForm({ maxOutputTokens: 4096, enabledModelIds: [] })
+    await expect(writeComateSettings(form, { cookieOnly: true })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly'])
+    expect(readComateValue(form).maxOutputTokens).toBe(4096)
   })
 })
 

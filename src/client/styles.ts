@@ -45,6 +45,10 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-sid-row{display:flex;gap:8px;align-items:center}
 .dsm-comate-sid-row .dsm-comate-input{flex:1;min-width:0}
 .dsm-comate-sid-row .dsm-btn{flex:none;white-space:nowrap}
+.dsm-comate-number-row{display:flex;align-items:center;gap:8px}
+.dsm-comate-input-number{width:160px;flex:none}
+.dsm-comate-unit{font-size:12px;color:var(--dsw-alias-label-tertiary,#9aa0a8)}
+.dsm-comate-hint-error{color:var(--dsw-alias-state-error-primary,#ef4444)}
 .dsm-comate-check{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:19px;color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:pointer}
 .dsm-comate-check input{margin-top:3px}
 .dsm-comate-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;flex-wrap:wrap}

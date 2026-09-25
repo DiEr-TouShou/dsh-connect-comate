@@ -8,8 +8,10 @@
  *     inert auth plane + 用 shim 的进程内 secret 作为 apiKey）由该项目
  *     （转引自 corrinehu/dsh-workbuddy-connect，MIT）实现并验证。
  * 改动：模型描述符的多模态由 Comate config 的 llm_types 判定
- *   （`llm-multimodal` → 图片输入），而非用户手动勾选；输出上限用
- *   COMATE_DEFAULT_MAX_TOKENS（config 无 max-output 字段）。
+ *   （`llm-multimodal` → 图片输入），而非用户手动勾选；输出上限由
+ *   `max-tokens.ts` 解析（配置字段 / env，0 = 不设上限），同时落进描述符的
+ *   `maxTokens` 与 profile 的 `configuredMaxTokens`——只有后者会成为**真**上限
+ *   （harness 的 `resolveCallWithInfo` 把它物化成 `config.maxTokens`）。
  *   `llm_types` 在真机上是**数组**（本机 10 个模型里 5 个带多模态标记），
  *   归一化在 `auth.ts` 的 `parseLlmTypes`；出站图片的线形状修正在
  *   `multimodal.ts`（实测网关对裸字符串/假 base64/svg 会静默给空正文）。
@@ -25,6 +27,7 @@ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { COMATE_DEFAULT_MAX_TOKENS, COMATE_MULTIMODAL_TYPE, type ComateModel } from './auth.ts'
 import type { ComateCatalog } from './catalog.ts'
+import { comateConfiguredMaxTokens, comateModelMaxTokens } from './max-tokens.ts'
 import type { ComateShim } from './shim.ts'
 
 /** Provider route this bundle owns. */
@@ -102,6 +105,19 @@ export interface ComateAdapterOptions {
   toProcessPath?: (hostPath: string) => string | undefined
   /** Observe one assistant history message degrading to provider-neutral replay. */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+  /**
+   * Live read of the configured output cap: a positive integer, or `0` for
+   * "no cap at all".
+   *
+   * Live rather than a snapshot because the value comes from the settings
+   * section: a saved change must apply to the next request, not the next
+   * restart. `invalidate()` still has to be called when it changes — the cap is
+   * also baked into the profile's `configuredMaxTokens`, which is what the
+   * harness turns into the request's `max_tokens`.
+   *
+   * Defaults to {@link COMATE_DEFAULT_MAX_TOKENS} when omitted.
+   */
+  maxOutputTokens?: () => number
 }
 
 /** What {@link createComateAdapter} hands back. */
@@ -172,9 +188,16 @@ export const COMATE_THINKING_LEVEL_MAP = {
  *
  * @param info - one catalog entry.
  * @param baseUrl - the shim origin plus `/v1`.
+ * @param maxOutputTokens - the resolved output cap; `0` means "no cap", spelled
+ * here as the model's own window because pi-ai refuses a non-positive
+ * `maxTokens` (see `comateModelMaxTokens`).
  * @returns the pi-ai model descriptor.
  */
-export function comatePiModel(info: ComateModel, baseUrl: string): Model<Api> {
+export function comatePiModel(
+  info: ComateModel,
+  baseUrl: string,
+  maxOutputTokens: number = COMATE_DEFAULT_MAX_TOKENS,
+): Model<Api> {
   return {
     id: info.id,
     name: info.name,
@@ -184,7 +207,7 @@ export function comatePiModel(info: ComateModel, baseUrl: string): Model<Api> {
     input: comateModelInput(info),
     cost: NO_COST,
     contextWindow: info.contextWindow,
-    maxTokens: COMATE_DEFAULT_MAX_TOKENS,
+    maxTokens: comateModelMaxTokens(maxOutputTokens, info.contextWindow),
     // Every model in the local catalog reasons by default (the baseline probe
     // always returned `reasoning_content`), and all of them accept the effort
     // parameter, so the capability is declared rather than withheld.
@@ -197,6 +220,16 @@ export function comatePiModel(info: ComateModel, baseUrl: string): Model<Api> {
       // nothing about the upstream. `'openai'` is the plain `reasoning_effort`
       // field, which is the spelling the gateway was measured to accept.
       thinkingFormat: 'openai',
+      // Same reason, same detection gap: without this pi-ai falls back to
+      // `max_completion_tokens`. Measured on the live gateway (2026-09, this
+      // machine, `deepseek-v4-flash`): BOTH spellings are honoured —
+      // `max_tokens: 16` and `max_completion_tokens: 16` each answer
+      // `finish_reason=length` with 16 characters, while `max_tokens: 0` reads
+      // as "no cap" (`finish_reason=stop`, the full 200-line answer).
+      // `max_tokens` is the classic OpenAI spelling and the one this project's
+      // live verification scripts already send, so the route declares it rather
+      // than leaving it to detection.
+      maxTokensField: 'max_tokens',
     },
   } as unknown as Model<Api>
 }
@@ -209,11 +242,15 @@ export function comatePiModel(info: ComateModel, baseUrl: string): Model<Api> {
 export function createComateAdapter(options: ComateAdapterOptions): ComateAdapter {
   const { shim, catalog } = options
 
+  /** Live read of the configured output cap; `0` means "no cap". */
+  const outputCap = (): number => options.maxOutputTokens?.() ?? COMATE_DEFAULT_MAX_TOKENS
+
   const buildModels = (): Model<Api>[] => {
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => comatePiModel(info, baseUrl))
+    const cap = outputCap()
+    return catalog.current().map(info => comatePiModel(info, baseUrl, cap))
   }
 
   const base = createProvider({
@@ -239,21 +276,32 @@ export function createComateAdapter(options: ComateAdapterOptions): ComateAdapte
   // provider, while the catalog answer tracks the config refresh.
   const provider: Provider = { ...base, getModels: () => buildModels() }
 
-  const profile: ResolvedPiAiProviderProfile = {
+  /**
+   * Build the profile snapshot: the catalog and the output cap are both read
+   * fresh, because `configuredMaxTokens` is what the harness turns into the
+   * request's `max_tokens` — a saved cap must land here, not only in the model
+   * descriptors.
+   */
+  const buildProfile = (): ResolvedPiAiProviderProfile => ({
     provider: COMATE_PROVIDER,
     displayName: 'WPS Comate',
     streamIdleTimeoutMs: COMATE_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-connect-comate retryPolicy'),
-    configuredMaxTokens: new Map(),
+    // The real per-request cap. `dsh-llm-pi-ai`'s own profile docs: a
+    // `configuredMaxTokens` entry is materialized into a request that names no
+    // cap of its own — and the harness does exactly that in
+    // `resolveCallWithInfo` (`config.maxTokens = info.defaultMaxTokens`). An
+    // unlimited cap yields an empty map, so nothing is materialized at all.
+    configuredMaxTokens: comateConfiguredMaxTokens(catalog.current().map(info => info.id), outputCap()),
     // Per-model failures gate every request: `modelOf` throws INVALID_CONFIG
     // for any id present here. The comate catalog is built from live reads,
     // so an empty map is the accurate answer — no known-bad model.
     modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: provider,
-  }
+  })
 
-  let profiles = new Map<string, ResolvedPiAiProviderProfile>([[COMATE_PROVIDER, profile]])
+  let profiles = new Map<string, ResolvedPiAiProviderProfile>([[COMATE_PROVIDER, buildProfile()]])
 
   const adapter = new PiAiAdapter({
     profiles: () => profiles,
@@ -278,7 +326,7 @@ export function createComateAdapter(options: ComateAdapterOptions): ComateAdapte
   return {
     adapter,
     invalidate: () => {
-      profiles = new Map<string, ResolvedPiAiProviderProfile>([[COMATE_PROVIDER, profile]])
+      profiles = new Map<string, ResolvedPiAiProviderProfile>([[COMATE_PROVIDER, buildProfile()]])
     },
   }
 }
