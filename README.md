@@ -72,11 +72,14 @@ WPS Comate 桌面端登录后，会把模型接入配置写在：
 | 环节 | 事实 | 依据 |
 | --- | --- | --- |
 | 能力判定 | config 的 `llm_types` 是 **JSON 数组**（`["llm-chat","llm-multimodal"]`）；也接受空格/逗号分隔的字符串，`multimodal: boolean` 优先 | `src/auth.ts` 的 `parseLlmTypes`；与桌面端 `isModelMultimodal` 同序 |
+| 宿主附件服务 | pi-ai 的 context builder **只能**通过宿主的 durable attachment service（`readImageRequest`）拿到图片字节；没接线时它回退到 text-only 分支，**任何带图片的请求整轮失败**（`UNSUPPORTED_CONTENT`），而纯文本请求照常——这正是 0.3.2 的机器现象 | `src/adapter.ts` 的 `resolveAttachments` / `resolveImageAccess`；与宿主自身 pi-ai provider 逐字同源（`resolveAttachments: () => ctx.get("attachments")`）；`tests/adapter-attachments.spec.ts` 以真 adapter + 真 shim 复现并修住 |
 | DSH 侧编码 | pi-ai 把附件的 `{type:'image', data, mimeType}` 编成 `image_url: { url: 'data:image/png;base64,…' }` | `tests/multimodal.spec.ts` 捕获真实请求体 |
 | 上游接受 | 网关接受**真 base64** 数据 URL，并正确识别图片内容 | 2026-09 本机直连 `llmproxy/v1/user/chat/completions`，96×96 纯色 PNG |
 | 出站归一化 | 裸字符串 `image_url` / 假 base64 前缀 / svg 三种形状会被网关**静默**处理成空正文，插件在出站前修掉 | 同上，四种形状各发一次 |
 
 插件**不做**图片上传。桌面端会把本地图片走 `assets/presign-upload` → ks3 PUT → `presign-download` 换成预签名 URL，但网关实测直接吃 base64，所以这一环对 DSH 是多余的复杂度；将来若网关改成只认 URL，再补它。
+
+链路上**没有捷径**的一环是上面那行「宿主附件服务」：图片字节由宿主的附件服务持有，本插件只能请求它——所以装配漏了它，解析和出站形状修得再对也到不了网关。反过来说，缺了它时本插件现在会打一条**一次性** `warn`（「附件服务不可用；图片会失败，文本不受影响」），而不是只留用户看到的一句裸 `UNSUPPORTED_CONTENT`。
 
 出站归一化（`src/multimodal.ts`）只做三件事，每件都把「静默失败」变成「能用的请求」：
 

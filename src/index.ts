@@ -189,6 +189,7 @@ export function apply(ctx: Context, config: Config): void {
   let providerRegistered = false
   let invalidateCatalog = (): void => {}
   let lastConfigFile = config.configFile
+  let warnedNoAttachments = false
 
   /** Live view over the plugin's own configuration section. */
   let current: () => Config = () => config
@@ -305,7 +306,38 @@ export function apply(ctx: Context, config: Config): void {
       try {
         // Constructed only once the listener holds a port: the provider's
         // models read the shim origin at construction time.
-        const comate = createComateAdapter({ shim, catalog })
+        const comate = createComateAdapter({
+          shim,
+          catalog,
+          // The durable attachment service is a HOST service: it owns the
+          // stored bytes of every image the user attached, and pi-ai's context
+          // builder reads them through it and nowhere else. An image whose
+          // service is missing therefore fails the whole request with
+          // `UNSUPPORTED_CONTENT` — the host's own pi-ai route wires the same
+          // pair. Resolved lazily per request, because the plugin that provides
+          // it may mount after this one; the warn is one-shot so a machine that
+          // never has it does not turn every image request into log noise.
+          attachments: () => {
+            const attachments = ctx.get('attachments')
+            if (attachments === undefined && !warnedNoAttachments) {
+              warnedNoAttachments = true
+              ctx.logger.warn(
+                'dsh-connect-comate: the host durable attachment service is unavailable; image input'
+                + ' will fail with UNSUPPORTED_CONTENT (text requests are unaffected)',
+              )
+            }
+            return attachments
+          },
+          // Only the text handle printed beside an image; the bytes travel
+          // through the attachment service either way.
+          toProcessPath: (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath),
+          onReplayDegrade: ({ provider, model, reason }) => {
+            ctx.logger.warn(
+              `dsh-connect-comate: unusable replay state on assistant history for route`
+              + ` "${provider}/${model}"; sending that message as provider-neutral content (${reason})`,
+            )
+          },
+        })
         invalidateCatalog = () => { comate.invalidate() }
 
         let releaseAdapter: (() => void) | undefined

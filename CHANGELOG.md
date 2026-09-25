@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.3 (2026-09-25)
+
+### Bug Fixes
+
+- **图片输入真的通了：0.3.2 只修了编码，没修装配。** 真机报 `pi-ai image input requires the durable attachment service` / `UNSUPPORTED_CONTENT`，**任何带图片的请求整轮失败**，纯文本照常。根因在 `createComateAdapter` 构造 `PiAiAdapter` 时漏了两个钩子：pi-ai 的 context builder 只能通过**宿主的 durable attachment service**（`readImageRequest`）拿到图片字节，没有它就走 text-only 回退分支并抛错。0.3.2 修的是「`llm_types` 数组解析」和「出站线形状」——两者都是真的、也都必要，但都在这条钩子的**下游**，所以单测全绿、真机仍然不能用。现在按宿主自己的 pi-ai provider 接上同一对：
+
+  - `resolveAttachments: () => ctx.get('attachments')`——**惰性解析**（提供它的插件可能比本插件后挂载），缺失时打一条一次性 warn 说明「图片会失败、文本不受影响」，而不是让用户只看到一句裸的 `UNSUPPORTED_CONTENT`。
+  - `resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(attachments, hostPath => ctx.get('fs')?.processPathFromHostPath(hostPath), ref)`——图片旁边那行只读路径句柄，映射到当前工具执行世界。
+  - 顺带接上 `onReplayDegrade`：助手历史里出现无法表达的内容时，日志里留下「哪条路由、为什么」。
+  - 类型上 `ComateAttachmentService` 从 `PiAiAdapterOptions['resolveAttachments']` **推导**，不 import 宿主的 `@deepseek-ai/dsh-attachment`：该包不在本插件依赖里（宿主自带），推导在有它的地方精确、没有它的地方退化成 `any`，不会变成一个错的形状。
+
+### Tests
+
+- 测试 155 → 158 例。新增 `adapter-attachments.spec.ts`：真 `PiAiAdapter` + 真 shim（真 HTTP 回环）+ 桩附件服务，只替换字节来源。三例分别钉住——**不接钩子要能一字不差复现真机报错**（控制组）、接上钩子后图片按对象形式 base64 送到转发层（断言 base64 等于宿主存的字节，且 pi-ai 插的只读路径句柄来自 `resolveImageAccess`）、正常路径零改动因此不写 warn。
+
+### Packaging
+
+- 版本提到 0.3.3（0.3.2 的安装产物带上述缺陷，版本号分开以便区分机器上装的是哪一份）。
+
 ## 0.3.2 (2026-09-25)
 
 ### Bug Fixes

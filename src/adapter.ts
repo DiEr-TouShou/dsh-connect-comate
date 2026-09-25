@@ -20,9 +20,9 @@
 import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, AuthContext, CredentialStore, Model, Provider } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { resolveImageAttachmentAccess, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { COMATE_DEFAULT_MAX_TOKENS, COMATE_MULTIMODAL_TYPE, type ComateModel } from './auth.ts'
 import type { ComateCatalog } from './catalog.ts'
 import type { ComateShim } from './shim.ts'
@@ -68,10 +68,40 @@ const INERT_AUTH: { credentials: CredentialStore; authContext: AuthContext } = {
 /** No per-token pricing is knowable for a subscription quota; report zero. */
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const
 
+/**
+ * The durable attachment service the host's pi-ai adapter asks for.
+ *
+ * Derived from the adapter's own option type rather than imported from
+ * `@deepseek-ai/dsh-attachment`: that package is host-bundled and outside this
+ * plugin's dependency set, and the derived type is exact where the package is
+ * present and `any` where it is not — never a wrong shape.
+ */
+export type ComateAttachmentService =
+  NonNullable<ReturnType<NonNullable<PiAiAdapterOptions['resolveAttachments']>>>
+
 /** Constructor dependencies. */
 export interface ComateAdapterOptions {
   shim: ComateShim
   catalog: ComateCatalog
+  /**
+   * The host's durable attachment service (`ctx.get('attachments')`).
+   *
+   * pi-ai cannot inline an image the harness never stored: its context builder
+   * reads the durable bytes through this service and nothing else, so an
+   * unwired accessor (or one that resolves nothing) makes the adapter reject
+   * every message carrying an image with `UNSUPPORTED_CONTENT` — which is
+   * exactly the failure the `image` modality we advertise must not have.
+   */
+  attachments?: () => ComateAttachmentService | undefined
+  /**
+   * Map one stored image's host path into the current tool execution world.
+   *
+   * Only shapes the text handle beside the image; the bytes travel through
+   * {@link ComateAdapterOptions.attachments} either way.
+   */
+  toProcessPath?: (hostPath: string) => string | undefined
+  /** Observe one assistant history message degrading to provider-neutral replay. */
+  onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
 }
 
 /** What {@link createComateAdapter} hands back. */
@@ -233,6 +263,16 @@ export function createComateAdapter(options: ComateAdapterOptions): ComateAdapte
     // validates this before forwarding and resolves the real Comate apiKey
     // itself via the store, so the secret never reaches upstream.
     resolveApiKey: async () => shim.token(),
+    // Images: the harness keeps them as durable attachments, and pi-ai's
+    // context builder is the only thing that turns one into request bytes.
+    // Without this pair the adapter falls back to its text-only builder, which
+    // throws `UNSUPPORTED_CONTENT` on any image — the whole advertised modality
+    // is dead while every text request still looks healthy. Same wiring as the
+    // host's own pi-ai provider, so the two routes agree on the seam.
+    resolveAttachments: () => options.attachments?.(),
+    resolveImageAccess: (attachments, ref) =>
+      resolveImageAttachmentAccess(attachments, (hostPath) => options.toProcessPath?.(hostPath), ref),
+    ...options.onReplayDegrade === undefined ? {} : { onReplayDegrade: options.onReplayDegrade },
   })
 
   return {
