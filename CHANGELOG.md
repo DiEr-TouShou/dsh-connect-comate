@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.1-rc.1 (2026-09-25)
+
+> 输出上限从「一个数管所有模型」变成**逐模型**：同一个路由上的模型各用各的上限。
+> 向后兼容——`maxOutputTokensByModel` 缺省为空表，老配置与老卡片行为一字不变。
+> 已打 tag `v0.4.1-rc.1`；安装：`github:DiEr-TouShou/dsh-connect-comate#v0.4.1-rc.1`。未上 npm。
+
+### Features
+
+- **每个模型可以单独设输出上限。** 卡片「启用的模型」里每个模型右侧多一个上限输入框。解析优先级四层：`WPS_COMATE_MAX_TOKENS`（env，最高，无头脚本与验收脚本靠它压过本机卡片）> `maxOutputTokensByModel[modelId]`（这个模型自己的条目）> `maxOutputTokens`（全局默认值）> 插件默认 32000。保存即生效，无需重启。
+
+  **「留空」与「填 0」是两件事**，这是这一版最容易做错的地方：留空 = 这个模型**没有条目**、跟随全局默认值（框里的灰字就是当前那个数），填 `0` = 这个模型**不设上限**（出站不带 `max_tokens` 字段，交给上游）。所以撤销一条覆盖就是清空那个框，界面里不需要第二个「复位」控件。整张表按 `maxOutputTokensByModel` 一次性写回，空框不进表——设置文档里不会留下空串，`0` 也不会被当成假值吃掉。
+
+- **逐模型解析真的落在 harness 唯一会读的那个字段上。** `configuredMaxTokens` 现在按模型给条目，模型描述符的 `maxTokens` 也按模型算（`resolveModel(modelId)` 那条路径），两者由**同一次**解析喂出来。不设上限的模型**整条缺席**而不是记成 `0`：这一层的 `0` 会被 harness 原样物化成 `max_tokens: 0`，而 pi-ai 在 `defaultMaxTokens` 上要的是正整数——缺席才是「这个模型不设上限」，并且只影响它自己，邻居的条目照旧。
+
+- **一条坏条目不再毒化整张表。** `parseMaxTokensByModel` 逐条校验（非负安全整数），坏条目丢掉、其余照用——而不是整张表一起回落到默认值。`unusableModelTokens` 把「丢的是哪个模型、原值长什么样」交出去给宿主打日志：否则用户在卡片里只看到一个空框，和「从没设过」长得一模一样。解析只报**优先级最高**的那条坏值（env 坏就报 env），免得用户去改一条根本不起作用的条目。
+
+### Bug Fixes
+
+- **`verify:card` 的 jsdom 环境里 React 一直跑在「无 DOM」模式**（脚本自身的 bug，不影响插件产物）：react-dom 在**模块加载那一刻**就用 `window` / `document` 判断自己在不在浏览器里，而脚本是先 `require('react-dom')`、后铺全局。于是它挑了老 IE 那套 `change` / `propertychange` 监听而不是 `input`——`click()` 与勾选框照常能用（所以原有 17 条一直绿），但**往输入框里敲字没人接**。现在先建 JSDOM、先铺全局、再 require react-dom，`input` 事件按浏览器里的样子派发。这个 bug 只有在新断言要求「敲字」时才暴露：修复前 39 条里 10 条红，且全红在这一处。
+
+### Tests
+
+- 测试 257 → 280 例。`max-tokens.spec.ts` 23 → 37：逐模型解析、坏条目只丢自己不丢别人、env 压过每模型条目、坏值报出模型名、`configuredMaxTokens` 按模型给条目、真 adapter 上两个模型各拿各的 `defaultMaxTokens`（含「不设上限的那个是 `undefined`」）。`settings-write.spec.ts` 31 → 40：整表写回、清空即删键、`0` 原样落盘、留空的模型不产生键。
+- `verify:card` 17 → 39 条断言：新增七组——每模型一格的默认空态与占位符（占位符必须是当前全局默认值）、设一个模型的上限后保存/退出/再进入、`0` 原样落盘、清空即删覆盖、非法值禁用保存并提示、外部改动对「碰过 / 没碰过」两种草稿的分别处理、撤销修改把每模型草稿一起还原。
+- 真机验收（`WPS_COMATE_LIVE=1`）：`max-tokens-live.spec.ts` 新增一条——同一个路由上两个模型，一个 `16` 一个不设上限，断言 harness 从 `resolveModel()` 读到的 `defaultMaxTokens` 一个是 `16`、另一个**是 `undefined`**，然后把这个值真发出去：被限的那个出站 body 里 `max_tokens: 16` 且上游真的截断（`reason = max-tokens`），不设上限的那个 body 里**没有** `max_tokens` 且真的数到了 100 以上——即「逐模型」在线上成立，而不是只有对象字段对。
+- 产物验收：`verify:installed`（5 模型图片矩阵 5/5 OK）、`verify:shim`（真凭据、真网关、HTTP 全链路 1/1 PASS）都在这一版的构建产物上跑过。
+
+### Packaging
+
+- 版本 0.4.0 → 0.4.1-rc.1（功能上是小版本，但按你的要求走 rc 线）。
+
 ## 0.4.0 (2026-09-25)
 
 > 从这一版起，凭据不再明文躺在 DSH profile 里。0.4.0 = 0.3.3 之后的**全部**改动：

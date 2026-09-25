@@ -107,6 +107,10 @@ node lib\bin.js doctor                               # storage=unreadable, probl
 - 选择随设置持久化（`enabledModelIds`），保存后无需重启即生效；
 - **「输出 token 上限」**：正整数为每个回答的上限，`0` 表示不限制（由上游决定），默认 32000；
   保存后无需重启即生效。清空或填非整数时保存按钮会禁用并提示（不会把默认值偷偷写回去）；
+- **每个模型可以单独设上限**：模型列表里每个模型右侧各有一个上限输入框，覆盖上面那个默认值。
+  **留空 = 跟随默认值**（框里的灰字就是当前默认值），填 `0` = 这个模型不限制，两种语义互不等价；
+  清空一个已设过的框就是撤销这条覆盖。整个设置只有一份 map（`maxOutputTokensByModel`），
+  保存时按整张表重写，所以「删掉一条」不需要额外的复位按钮。填了非整数一样禁用保存并提示；
 - **「刷新模型列表」** 让宿主重读本机 Comate 配置（在桌面端刚登录/刚换账号时用，不必重启 DSH）；
 - 模型目录由宿主只读路由 `GET /plugins/dsh-connect-comate/__catalog` 提供（响应含 `signedIn`、`providerRegistered`、`models`，**不含任何凭据**）。宿主不再把目录回写进设置：0.1.7 上设置写入的目标是用户手写的 `cordis.patch.yml`，宿主每次发现变化都去重写它会破坏该文件的注释与格式。
 
@@ -283,7 +287,7 @@ pnpm run check   # typecheck + test + build
 | `WPS_COMATE_CONFIG_FILE` | 显式指定 config 文件路径 |
 | `WPS_COMATE_HOME` | 显式指定 Comate 家目录（默认 `~/.wpscomate`） |
 | `WPS_COMATE_SID` | 手动提供 wps_sid 值（与 DSH 设置里的 `wpsSid` 等效，命令行验证用） |
-| `WPS_COMATE_MAX_TOKENS` | 覆盖输出 token 上限（正整数；`0` = 不限制）。存在即优先于设置里的 `maxOutputTokens`，无头脚本用 |
+| `WPS_COMATE_MAX_TOKENS` | 覆盖输出 token 上限（正整数；`0` = 不限制）。存在即优先于 `maxOutputTokensByModel` 与 `maxOutputTokens`，无头脚本用 |
 | `WPS_COMATE_SECRET_KEY_FILE` | 显式指定密钥文件路径（默认 `$WPS_COMATE_HOME/dsh-connect-comate/secret.key`）。profile 从别处搬来、或想共用同一把钥匙时用 |
 
 插件 Config（通过 profile 覆盖层 `profiles/<profile>/cordis.patch.yml` 的 `config:` 传入）：
@@ -293,11 +297,12 @@ pnpm run check   # typecheck + test + build
 | `wpsSid` | 手动填写的 wps_sid（www.wps.cn cookies 取值，不带前缀）。**密文保存**：明文只在卡片里输入的那一刻存在，宿主写入前会加密成 `enc:v1:…`；手写明文也兼容（卡片一打开就升级） |
 | `cookieOnly` | 只发 Cookie 鉴权（上游报 API 密钥无效时开启） |
 | `enabledModelIds` | 勾选启用的模型 id 列表；空 = 全部显示（一般用卡片勾选，不用手填） |
-| `maxOutputTokens` | 每个请求的输出 token 上限（正整数）；`0` = 不限制，交给上游。缺省用插件默认 32000 |
+| `maxOutputTokens` | 输出 token 上限的**默认值**（所有模型共用，正整数）；`0` = 不限制，交给上游。缺省用插件默认 32000 |
+| `maxOutputTokensByModel` | 按模型 id 覆盖上限的 map（`{"<model id>": 8192}`）；`0` = 该模型不限制；**没有这个键的模型跟随 `maxOutputTokens`**。卡片里的每模型输入框写的就是它，手填也可用 |
 | `lastCatalog` | **已弃用**：宿主不再回写目录，卡片改从只读路由读取；保留字段只为让旧配置仍能通过校验 |
 | `configFile` | 显式指定 config.json 路径 |
 
-> `wpsSid` / `cookieOnly` / `enabledModelIds` / `maxOutputTokens` 四个字段在 0.1.7 线上必须由 schema 声明为 volatile，
+> `wpsSid` / `cookieOnly` / `enabledModelIds` / `maxOutputTokens` / `maxOutputTokensByModel` 五个字段在 0.1.7 线上必须由 schema 声明为 volatile，
 > 否则设置写入会被直接拒绝（`Plugin entry "…" has no volatile fields`）。字段值在 0.1.7 上以
 > `{get(): T}` 活引用交付，所有读路径都经 `unwrapVolatile()` / `unwrapVolatileDeep()`。
 
