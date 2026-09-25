@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3-rc.2 (2026-09-25)
+
+> 相对 0.3.3-rc.1 **无代码改动**，只改仓库元数据。`v0.3.3-rc.1` 已经推送到公开仓库，选择不去改写已发布的 tag，另起一个号。
+
+### Chores
+
+- **仓库迁到 `DiEr-TouShou/dsh-connect-comate`**（原 `bakasbk/dsh-connect-comate` 保留为 `upstream` remote）。`package.json` 的 `repository` / `homepage` / `bugs` 与 `README.md` 的安装命令同步改指新仓库；CHANGELOG 中的历史条目按原样保留（它们记录的是当时的事实）。
+- README 安装段补一句：可用 `#v0.3.3-rc.2` 固定版本安装。
+
 ## 0.3.3-rc.1 (2026-09-25)
 
 ### Bug Fixes

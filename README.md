@@ -145,11 +145,15 @@ base64，才是图片外置真正要钉住的东西。
 **从 GitHub 安装（推荐）**：
 
 ```sh
-dsh plugin --profile <web|desktop|dsh-tui> add github:bakasbk/dsh-connect-comate
+dsh plugin --profile <web|desktop|dsh-tui> add github:DiEr-TouShou/dsh-connect-comate
 ```
+
+要固定版本，可带 tag：`github:DiEr-TouShou/dsh-connect-comate#v0.3.3-rc.2`（`lib/` 是构建产物、不入库，带 tag 也照常触发构建）。
 
 仓库只提交源码（`lib/` 是构建产物，不入库），所以这一步会在克隆后自动执行 `prepare` → `tsdown`。
 DSH 会把它作为**待批准的构建脚本**列出，在插件面板确认一次即可。
+
+> 本仓库由 `bakasbk/dsh-connect-comate` 迁出，原仓库保留为 upstream。
 
 **从本地路径安装（开发模式）**：
 
