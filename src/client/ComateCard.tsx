@@ -1,7 +1,8 @@
 /**
  * Comate connection card contributed to DSH's plugin configuration:
- * a wps_sid input, a cookie-only toggle, an output-token cap, a model-selection
- * list, and save/discard actions.
+ * a wps_sid input, a cookie-only toggle, a default output-token cap, a
+ * model-selection list with a per-model cap box on every row, and save/discard
+ * actions.
  *
  * 卡片外壳形态参考 dingminhua/dsh-connect-workbuddy（MIT）。
  *
@@ -150,6 +151,53 @@ function sameIdSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boole
   return left.size === right.size && [...left].every(id => right.has(id))
 }
 
+/**
+ * One model's cap box, as typed: a string, never a number.
+ *
+ * A text draft is what lets the user clear the box and retype without React
+ * fighting them for a value the parser would reject (same reason as the global
+ * cap field).
+ */
+type CapDrafts = Readonly<Record<string, string>>
+
+/**
+ * Read the per-model boxes: the caps they would save, plus the ids that hold
+ * something unusable.
+ *
+ * An EMPTY box means "no override" and is dropped rather than defaulted: that
+ * is what makes "follow the global cap" expressible, and what lets the user undo
+ * an override by clearing the box.
+ */
+function parseCapDrafts(drafts: CapDrafts): { caps: Record<string, number>; invalid: string[] } {
+  const caps: Record<string, number> = {}
+  const invalid: string[] = []
+  for (const [id, text] of Object.entries(drafts)) {
+    if (text.trim() === '') continue
+    const value = parseMaxOutputTokens(text)
+    if (value === undefined) invalid.push(id)
+    else caps[id] = value
+  }
+  return { caps, invalid }
+}
+
+/**
+ * A fingerprint of a cap map that ignores key order.
+ *
+ * Used for the two questions the card asks about a map: "has the user touched
+ * this draft?" and "is there anything to save?". A JSON dump would answer
+ * neither — the same map rebuilt in another order would read as a change.
+ */
+function capKey(caps: Readonly<Record<string, number>>): string {
+  return Object.keys(caps).sort().map(id => `${id}=${String(caps[id])}`).join('\n')
+}
+
+/** Seed the text boxes from a stored map (0 is a real value: "unlimited"). */
+function textCapDrafts(caps: Readonly<Record<string, number>>): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const [id, value] of Object.entries(caps)) drafts[id] = String(value)
+  return drafts
+}
+
 /** Render the Comate sign-in configuration as one card (or page body). */
 export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   if (t === undefined) throw new Error('Comate plugin card requires its translation function')
@@ -172,6 +220,11 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // An unset cap means the plugin default is in force; the input shows that
   // number rather than an empty box, because the field always has an effect.
   const savedMaxTokens = saved.maxOutputTokens ?? COMATE_DEFAULT_MAX_TOKENS
+  // The per-model overrides, as stored. Absent/empty means "every model follows
+  // the default above" — the normal case, and the reason a fresh card shows an
+  // empty box on every row.
+  const savedModelCaps = useMemo(() => saved.maxOutputTokensByModel ?? {}, [saved.maxOutputTokensByModel])
+  const savedModelCapsKey = useMemo(() => capKey(savedModelCaps), [savedModelCaps])
   const [catalog, setCatalog] = useState<ComatePersistedModel[]>([])
   const [catalogFailed, setCatalogFailed] = useState(false)
   const catalogIds = useMemo(() => catalog.map(model => model.id), [catalog])
@@ -192,6 +245,11 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // A text draft, not a number: the user must be able to clear the field and
   // retype without React fighting them for a value the parser would reject.
   const [draftMaxTokens, setDraftMaxTokens] = useState(String(savedMaxTokens))
+  // Per-model cap boxes, keyed by model id, holding the raw text: an empty box
+  // means "follow the default cap" and is never written as an override.
+  const [draftModelCaps, setDraftModelCaps] = useState<Record<string, string>>(
+    () => textCapDrafts(savedModelCaps),
+  )
   const [saving, setSaving] = useState(false)
   const [savedFlash, setSavedFlash] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -358,6 +416,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // draft is still the empty seed, and the re-seed never fired.
   const prevSavedCookieOnly = useRef(savedCookieOnly)
   const prevSavedMaxTokens = useRef(savedMaxTokens)
+  const prevSavedModelCaps = useRef<string | undefined>(undefined)
   const prevSavedEnabled = useRef<ReadonlySet<string> | undefined>(undefined)
   useEffect(() => {
     const previous = prevSavedCookieOnly.current
@@ -373,6 +432,19 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     prevSavedMaxTokens.current = savedMaxTokens
     setDraftMaxTokens(current => (current === String(previous) ? String(savedMaxTokens) : current))
   }, [savedMaxTokens])
+  // The per-model map, by the same rule: a draft the user has not touched follows
+  // a map changed from another surface (another card, or a hand-edited
+  // cordis.patch.yml), while a touched one is left alone. `undefined` means
+  // "nothing observed yet" — the draft was seeded from that very value by
+  // `useState`, so there is nothing to re-seed on the first run.
+  useEffect(() => {
+    const previous = prevSavedModelCaps.current
+    prevSavedModelCaps.current = savedModelCapsKey
+    if (previous === undefined || previous === savedModelCapsKey) return
+    setDraftModelCaps(current => (capKey(parseCapDrafts(current).caps) === previous
+      ? textCapDrafts(savedModelCaps)
+      : current))
+  }, [savedModelCapsKey, savedModelCaps])
   // The directory arrives asynchronously, so the saved set moves from the empty
   // set to "everything discovered" once the fetch lands — which re-seeds a draft
   // the user has not touched yet. `undefined` means "nothing observed yet": the
@@ -403,9 +475,15 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const draftMaxTokensValue = parseMaxOutputTokens(draftMaxTokens)
   const maxTokensInvalid = draftMaxTokensValue === undefined
   const maxTokensDirty = draftMaxTokens.trim() !== String(savedMaxTokens)
+  // The per-model boxes: `invalid` holds the ids whose text is not a cap at all,
+  // and `caps` is what Save would write.
+  const capDrafts = parseCapDrafts(draftModelCaps)
+  const modelCapsInvalid = capDrafts.invalid.length > 0
+  const modelCapsDirty = capKey(capDrafts.caps) !== savedModelCapsKey
   const dirty = sidDirty
     || draftCookieOnly !== savedCookieOnly
     || maxTokensDirty
+    || modelCapsDirty
     || !sameIdSet(draftEnabled, savedEnabledIds)
 
   /**
@@ -461,6 +539,7 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     setDraftCookieOnly(savedCookieOnly)
     setDraftEnabled(new Set(savedEnabledIds))
     setDraftMaxTokens(String(savedMaxTokens))
+    setDraftModelCaps(textCapDrafts(savedModelCaps))
     setError(undefined)
     setSidNote(undefined)
   }
@@ -513,6 +592,12 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         // this branch is about the untouched-but-unparsable edge (a value stored
         // by hand that this card cannot round-trip) rather than normal use.
         ...(draftMaxTokensValue === undefined ? {} : { maxOutputTokens: draftMaxTokensValue }),
+        // The per-model map is written only when it CHANGED: unlike the fields
+        // above it has a compact "nothing to say" spelling (an empty map), and a
+        // save that only moved a checkbox should not rewrite it. When it did
+        // change the WHOLE map goes out — that is how a cleared box removes its
+        // key from the document.
+        ...(modelCapsDirty ? { maxOutputTokensByModel: capDrafts.caps } : {}),
       })
       if (!mounted.current) return
       setDraftSid(null)
@@ -749,24 +834,56 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                       <div className="dsm-comate-model-list">
                         {catalog.map(model => (
                           <div className="dsm-comate-model" key={model.id}>
-                            <label className="dsm-comate-model-row" title={model.id}>
-                              <input
-                                type="checkbox"
-                                checked={draftEnabled.has(model.id)}
-                                disabled={!writable || saving}
-                                onChange={() => { toggleModel(model.id) }}
-                              />
-                              <span className="dsm-comate-model-name">{model.name}</span>
-                              {model.multimodal
-                                ? <span className="dsm-comate-model-tag">{t('row.modelMultimodal')}</span>
-                                : null}
-                            </label>
+                            <div className="dsm-comate-model-main">
+                              <label className="dsm-comate-model-row" title={model.id}>
+                                <input
+                                  type="checkbox"
+                                  checked={draftEnabled.has(model.id)}
+                                  disabled={!writable || saving}
+                                  onChange={() => { toggleModel(model.id) }}
+                                />
+                                <span className="dsm-comate-model-name">{model.name}</span>
+                                {model.multimodal
+                                  ? <span className="dsm-comate-model-tag">{t('row.modelMultimodal')}</span>
+                                  : null}
+                              </label>
+                              {/* One cap box per model. Empty = follow the default
+                                  above (the placeholder shows that number), so an
+                                  override can be undone by clearing the box —
+                                  there is no separate "reset" control to hunt for. */}
+                              <div className="dsm-comate-model-cap">
+                                <input
+                                  className="dsm-comate-input dsm-comate-input-number"
+                                  type="number"
+                                  inputMode="numeric"
+                                  min={0}
+                                  step={1}
+                                  spellCheck={false}
+                                  aria-label={t('row.modelCapAria', { model: model.name, global: savedMaxTokens })}
+                                  title={t('row.modelCapTitle')}
+                                  placeholder={String(savedMaxTokens)}
+                                  value={draftModelCaps[model.id] ?? ''}
+                                  disabled={!writable || saving}
+                                  aria-invalid={capDrafts.invalid.includes(model.id)}
+                                  onChange={event => {
+                                    const text = event.currentTarget.value
+                                    setDraftModelCaps(current => ({ ...current, [model.id]: text }))
+                                  }}
+                                />
+                                <span className="dsm-comate-unit">{t('row.maxTokensUnit')}</span>
+                              </div>
+                            </div>
                             <p className="dsm-comate-model-meta">
                               {formatContext(model.contextWindow)} context · {model.id}
                             </p>
                           </div>
                         ))}
                       </div>
+                      <p className={`dsm-comate-hint${modelCapsInvalid ? ' dsm-comate-hint-error' : ''}`}>
+                        {modelCapsInvalid
+                          ? t('row.modelCapInvalid')
+                          : t('row.modelCapHint', { global: savedMaxTokens })}
+                      </p>
                     </>}
               </section>
               <div className="dsm-comate-actions">
@@ -794,7 +911,8 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                 <button
                   type="button"
                   className="dsm-btn dsm-btn-primary"
-                  disabled={!writable || !dirty || saving || maxTokensInvalid || (sidReplace && trimmedSid.startsWith('wps_sid='))}
+                  disabled={!writable || !dirty || saving || maxTokensInvalid || modelCapsInvalid
+                    || (sidReplace && trimmedSid.startsWith('wps_sid='))}
                   onClick={() => { void save() }}
                 >
                   {saving ? t('row.saving') : t('row.save')}

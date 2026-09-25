@@ -126,6 +126,17 @@ export interface ComateSettingsPatch {
   enabledModelIds?: readonly string[]
   /** Output-token cap: positive integer, or 0 for "no cap". */
   maxOutputTokens?: number
+  /**
+   * Per-model overrides of {@link ComateSettingsValue.maxOutputTokens}, keyed by
+   * model id (0 = no cap for that model).
+   *
+   * Only overrides the card actually holds appear here: a model with no entry
+   * follows the global field, so removing an override means deleting the key
+   * rather than writing the global value into it. A full map is written on every
+   * save that touched it, which is also how a removed key gets removed from the
+   * document.
+   */
+  maxOutputTokensByModel?: Readonly<Record<string, number>>
 }
 
 /**
@@ -224,6 +235,20 @@ export function readComateValue(form: ComateSettingsForm | undefined): ComateSet
   if (typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens >= 0) {
     value.maxOutputTokens = maxOutputTokens
   }
+  // The per-model map is the same kind of value one level down: every entry must
+  // pass the same test as the global field, and a bad entry is dropped instead of
+  // being handed to the save path — one model's broken number must not make the
+  // whole map unreadable. The map itself may also arrive as a live reference.
+  const byModel = unwrapVolatile(section.maxOutputTokensByModel)
+  if (byModel !== null && typeof byModel === 'object' && !Array.isArray(byModel)) {
+    const caps: Record<string, number> = {}
+    for (const [id, raw] of Object.entries(byModel as Record<string, unknown>)) {
+      const cap = unwrapVolatile(raw)
+      if (id.trim() === '' || typeof cap !== 'number' || !Number.isSafeInteger(cap) || cap < 0) continue
+      caps[id] = cap
+    }
+    if (Object.keys(caps).length > 0) value.maxOutputTokensByModel = caps
+  }
   return value
 }
 
@@ -232,6 +257,22 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   if (left.length !== right.length) return false
   const set = new Set(left)
   return right.every(id => set.has(id))
+}
+
+/**
+ * Whether two cap maps say the same thing.
+ *
+ * By membership and value, not by key order: a map rebuilt in another order (or
+ * one that dropped a key whose value was the same as the global field) is still
+ * the same setting, and a false "did not persist" verdict would be unactionable.
+ */
+function sameCapMap(
+  left: Readonly<Record<string, number>>,
+  right: Readonly<Record<string, number>>,
+): boolean {
+  const ids = Object.keys(left)
+  if (ids.length !== Object.keys(right).length) return false
+  return ids.every(id => left[id] === right[id])
 }
 
 /**
@@ -281,6 +322,11 @@ export async function writeComateSettings(
   if (patch.maxOutputTokens !== undefined) {
     await writeField(form, 'maxOutputTokens', patch.maxOutputTokens)
   }
+  // A copy, not the caller's object: the write path hands this to the Host, and
+  // the card's draft must not become shared mutable state with it.
+  if (patch.maxOutputTokensByModel !== undefined) {
+    await writeField(form, 'maxOutputTokensByModel', { ...patch.maxOutputTokensByModel })
+  }
 
   await afterWriteSettles()
   const saved = readComateValue(form)
@@ -305,6 +351,14 @@ export async function writeComateSettings(
       'not-persisted',
       'maxOutputTokens',
       'settings field "maxOutputTokens" was not persisted',
+    )
+  }
+  if (patch.maxOutputTokensByModel !== undefined
+    && !sameCapMap(saved.maxOutputTokensByModel ?? {}, patch.maxOutputTokensByModel)) {
+    throw new ComateSettingsWriteError(
+      'not-persisted',
+      'maxOutputTokensByModel',
+      'settings field "maxOutputTokensByModel" was not persisted',
     )
   }
 }

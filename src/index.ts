@@ -30,7 +30,7 @@ import type { ComateModel, ComateSidResolution } from './auth.ts'
 import { COMATE_DEFAULT_MAX_TOKENS, ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
 import { runComateCheck, type ComateCheckOutcome } from './check.ts'
-import { COMATE_MAX_TOKENS_ENV, resolveMaxOutputTokens } from './max-tokens.ts'
+import { COMATE_MAX_TOKENS_ENV, parseMaxTokensByModel, resolveComateMaxTokens, resolveMaxOutputTokens, unusableModelTokens } from './max-tokens.ts'
 import { createComateShim } from './shim.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import {
@@ -146,7 +146,11 @@ export {
   comateConfiguredMaxTokens,
   comateModelMaxTokens,
   parseMaxOutputTokens,
+  parseMaxTokensByModel,
+  resolveComateMaxTokens,
   resolveMaxOutputTokens,
+  unusableModelTokens,
+  type ComateMaxTokensQuery,
   type ComateMaxTokensResolution,
   type ComateMaxTokensSource,
 } from './max-tokens.ts'
@@ -193,11 +197,23 @@ export interface Config {
    * the harness materializes into a request that names no cap of its own. So `0`
    * genuinely restores the uncapped behaviour this plugin had before.
    *
+   * Since 0.4.1-rc.1 this is the DEFAULT every model follows unless
+   * {@link Config.maxOutputTokensByModel} overrides it for that model.
+   *
    * `WPS_COMATE_MAX_TOKENS` overrides this field when set (deliberate: headless
    * runs and the live verification scripts must be able to force a value over
    * whatever the card saved).
    */
   maxOutputTokens?: number
+  /**
+   * Per-model overrides of {@link Config.maxOutputTokens}, keyed by model id.
+   *
+   * Written by the card's per-model cap boxes. An entry is `0` for "no cap for
+   * this model"; a model with no entry follows the global field, so removing an
+   * override means deleting its key. Blank entries are never stored, which is
+   * what keeps the settings document readable.
+   */
+  maxOutputTokensByModel?: Record<string, number>
 }
 
 const persistedModelConfig = z.object({
@@ -208,7 +224,7 @@ const persistedModelConfig = z.object({
 })
 
 /**
- * The three fields the card writes. Each one is declared volatile so 0.1.7's
+ * The four fields the card writes. Each one is declared volatile so 0.1.7's
  * write gate (`volatileForm` non-empty, then `isVolatilePath` per written path)
  * accepts it; on 0.1.5 `asVolatile` is an identity no-op and the schema stays
  * exactly the shape that line validated before.
@@ -222,7 +238,10 @@ export const Config: z<Config> = z.object({
   lastCatalog: z.array(persistedModelConfig).default([]).description('已弃用：宿主不再回写目录，卡片改从只读路由读取'),
   enabledModelIds: asVolatile(z.array(z.string()).default([]).description('勾选启用的模型 id；留空表示全部启用')),
   maxOutputTokens: asVolatile(z.number().step(1).min(0).default(COMATE_DEFAULT_MAX_TOKENS).description(
-    '输出 token 上限：正整数为上限，0 表示不设上限（由上游决定）；环境变量 WPS_COMATE_MAX_TOKENS 存在时优先生效',
+    '输出 token 上限（默认值，所有模型共用）：正整数为上限，0 表示不设上限（由上游决定）；单个模型可在 maxOutputTokensByModel 里覆盖；环境变量 WPS_COMATE_MAX_TOKENS 存在时优先于两者生效',
+  )),
+  maxOutputTokensByModel: asVolatile(z.dict(z.number().step(1).min(0)).default({}).description(
+    '按模型 id 覆盖输出 token 上限：正整数为上限，0 表示该模型不设上限；未列出的模型跟随 maxOutputTokens',
   )),
 })
 
@@ -249,12 +268,17 @@ export function apply(ctx: Context, config: Config): void {
   const shim = createComateShim({ store, client, catalog, uploader, logger: ctx.logger })
 
   /**
-   * Live read of the configured output cap (`0` = no cap).
+   * Live read of the configured output cap for one model (`0` = no cap).
    *
    * Read per call rather than captured, so a saved card value applies to the
-   * next request. Precedence and the `0` spelling live in `max-tokens.ts`.
+   * next request. Precedence and the `0` spelling live in `max-tokens.ts`:
+   * env → that model's own entry → the global field → 32000.
    */
-  const outputCap = (): number => resolveMaxOutputTokens(current().maxOutputTokens).value
+  const outputCap = (modelId: string): number => resolveComateMaxTokens({
+    modelId,
+    byModel: current().maxOutputTokensByModel,
+    configValue: current().maxOutputTokens,
+  }).value
 
   let stopped = false
   ctx.effect(() => () => { stopped = true })
@@ -270,17 +294,20 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * Say out loud which output cap is in force, once per change.
    *
-   * Two cases deserve a line: a value that was set but unusable (otherwise a
-   * mistyped `WPS_COMATE_MAX_TOKENS` would silently do nothing), and an env value
-   * overriding a differing saved card value (otherwise the card would look
-   * broken). An ordinary save, or the plain default, logs nothing.
+   * Three cases deserve a line: a value that was set but unusable (otherwise a
+   * mistyped `WPS_COMATE_MAX_TOKENS` — or a hand-edited per-model entry — would
+   * silently do nothing), and an env value overriding a differing saved card
+   * value (otherwise the card would look broken). An ordinary save, or the plain
+   * default, logs nothing.
    */
   let lastCapNote = ''
-  const reportOutputCap = (configValue: unknown): void => {
-    const resolution = resolveMaxOutputTokens(configValue)
+  const reportOutputCap = (settings: Config): void => {
+    const resolution = resolveMaxOutputTokens(settings.maxOutputTokens)
     // What the settings field says, env ignored: only needed to spot an override.
-    const saved = resolveMaxOutputTokens(configValue, {}).value
-    const note = `${resolution.source}:${resolution.value}:${String(saved)}:${resolution.ignored === undefined ? '' : 'ignored'}`
+    const saved = resolveMaxOutputTokens(settings.maxOutputTokens, {}).value
+    const overrides = parseMaxTokensByModel(settings.maxOutputTokensByModel)
+    const refused = unusableModelTokens(settings.maxOutputTokensByModel)
+    const note = `${resolution.source}:${resolution.value}:${String(saved)}:${overrides.size}:${refused.length}`
     if (note === lastCapNote) return
     lastCapNote = note
     if (resolution.ignored !== undefined) {
@@ -293,6 +320,15 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.warn(
         `dsh-connect-comate: ${COMATE_MAX_TOKENS_ENV} overrides the saved output cap`
         + ` (${resolution.value} instead of ${saved}; 0 means no cap)`,
+      )
+    }
+    // A dropped entry is one model's setting that could not be read. Naming the
+    // model is the only way the user can find it: the card renders that box
+    // empty, which looks exactly like "never set".
+    for (const entry of refused) {
+      ctx.logger.warn(
+        `dsh-connect-comate: ignoring the unusable output cap for model "${entry.modelId}"`
+        + ` (${JSON.stringify(entry.raw)}); that model follows the global cap`,
       )
     }
   }
@@ -354,7 +390,7 @@ export function apply(ctx: Context, config: Config): void {
     store.setConfigFile(next.configFile)
     store.setWpsSid(next.wpsSid)
     store.setCookieOnly(next.cookieOnly === true)
-    reportOutputCap(next.maxOutputTokens)
+    reportOutputCap(next)
     // Fire-and-forget: it only logs, and a settings change must not wait on file
     // I/O (the key file may live on a slow or missing path).
     void reportSidStorage()

@@ -25,7 +25,10 @@ import {
   comateConfiguredMaxTokens,
   comateModelMaxTokens,
   parseMaxOutputTokens,
+  parseMaxTokensByModel,
+  resolveComateMaxTokens,
   resolveMaxOutputTokens,
+  unusableModelTokens,
 } from '../src/max-tokens.ts'
 import type { ComateShim } from '../src/shim.ts'
 
@@ -125,14 +128,21 @@ describe('comateModelMaxTokens', () => {
 })
 
 describe('comateConfiguredMaxTokens', () => {
-  it('lists every served model against the cap', () => {
-    expect([...comateConfiguredMaxTokens(['a', 'b'], 4096)]).toEqual([['a', 4096], ['b', 4096]])
+  it('lists every served model against its own cap', () => {
+    expect([...comateConfiguredMaxTokens([['a', 4096], ['b', 4096]])]).toEqual([['a', 4096], ['b', 4096]])
   })
 
-  it('leaves the model out entirely when the cap is unlimited', () => {
+  it('carries different caps for different models', () => {
+    // 这一层是**按模型**的：上限本来就该逐模型解析，一个统一的数只是它的默认值。
+    expect([...comateConfiguredMaxTokens([['a', 4096], ['b', 8192]])]).toEqual([['a', 4096], ['b', 8192]])
+  })
+
+  it('leaves a model out entirely when its cap is unlimited', () => {
     // 不是「列成 0」：这一层的一个 0 会被 harness 原样物化成 `max_tokens: 0`，
-    // 而 pi-ai 在 `defaultMaxTokens` 上要的是正整数。缺席才是「不设上限」。
-    expect([...comateConfiguredMaxTokens(['a'], COMATE_UNLIMITED_MAX_TOKENS)]).toEqual([])
+    // 而 pi-ai 在 `defaultMaxTokens` 上要的是正整数。缺席才是「不设上限」——
+    // 而且缺席只影响这一个模型，邻居的条目照旧。
+    expect([...comateConfiguredMaxTokens([['a', COMATE_UNLIMITED_MAX_TOKENS], ['b', 8192]])])
+      .toEqual([['b', 8192]])
   })
 })
 
@@ -161,13 +171,107 @@ describe('comatePiModel', () => {
   })
 })
 
+describe('parseMaxTokensByModel', () => {
+  it('keeps usable entries, 0 included', () => {
+    // 0 是「这个模型不设上限」，与「没写这一条」（跟随全局）是两件事。
+    expect([...parseMaxTokensByModel({ a: 4096, b: '512', c: 0 })]).toEqual([['a', 4096], ['b', 512], ['c', 0]])
+  })
+
+  it('drops unusable entries instead of poisoning the whole map', () => {
+    // 一条坏条目是「一个模型的设置读不出来」，不该让其余模型一起回落到默认值。
+    // 空字符串键不算模型 id，一并丢掉。
+    expect([...parseMaxTokensByModel({ a: -1, b: 'abc', '': 4096, c: 4096 })]).toEqual([['c', 4096]])
+  })
+
+  it('reads anything that is not a map as "no overrides"', () => {
+    for (const bad of [undefined, null, 'x', 42, ['a'], true]) {
+      expect([...parseMaxTokensByModel(bad)], `value=${String(bad)}`).toEqual([])
+    }
+  })
+
+  it('reports exactly what it dropped, with the model named', () => {
+    // 丢是丢，但不能无声无息：宿主靠这个列表打日志，否则用户在卡片里只会看到
+    // 一个空框（和「从没设过」长得一模一样）。
+    expect(unusableModelTokens({ a: -1, b: 4096, c: '32000k' }))
+      .toEqual([{ modelId: 'a', raw: -1 }, { modelId: 'c', raw: '32000k' }])
+    expect(unusableModelTokens({ a: 4096 })).toEqual([])
+    expect(unusableModelTokens(undefined)).toEqual([])
+  })
+})
+
+describe('resolveComateMaxTokens', () => {
+  const MODEL = 'test/model-chat//public'
+
+  it('lets a per-model entry override the global field', () => {
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { [MODEL]: 8192 },
+      configValue: 4096,
+      env: env(),
+    })).toEqual({ value: 8192, source: 'model' })
+  })
+
+  it('follows the global field when the model has no entry', () => {
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { 'other/model//public': 8192 },
+      configValue: 4096,
+      env: env(),
+    })).toEqual({ value: 4096, source: 'config' })
+  })
+
+  it('treats a per-model 0 as "no cap for this model"', () => {
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { [MODEL]: 0 },
+      configValue: 4096,
+      env: env(),
+    })).toEqual({ value: COMATE_UNLIMITED_MAX_TOKENS, source: 'model' })
+  })
+
+  it('lets the env var override the per-model entry', () => {
+    // env 仍然是最高一层：无头脚本必须能压过本机卡片里存的任何东西。
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { [MODEL]: 8192 },
+      configValue: 4096,
+      env: env('64'),
+    })).toEqual({ value: 64, source: 'env' })
+  })
+
+  it('names the model when its entry is unusable, and falls back to the global field', () => {
+    // 「这条读不出来」必须说出是哪个模型，否则用户只能看到空框。
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { [MODEL]: '32000k' },
+      configValue: 4096,
+      env: env(),
+    })).toEqual({ value: 4096, source: 'config', ignored: { layer: 'model', raw: '32000k', modelId: MODEL } })
+  })
+
+  it('prefers reporting the unusable env value over the unusable per-model one', () => {
+    // 一次只能报一条，报优先级更高的那层——否则用户会去改一条根本不起作用的条目。
+    expect(resolveComateMaxTokens({
+      modelId: MODEL,
+      byModel: { [MODEL]: -1 },
+      configValue: 4096,
+      env: env('abc'),
+    })).toEqual({ value: 4096, source: 'config', ignored: { layer: 'env', raw: 'abc' } })
+  })
+
+  it('resolves the global answer when no model is named', () => {
+    expect(resolveComateMaxTokens({ byModel: { [MODEL]: 8192 }, configValue: 4096, env: env() }))
+      .toEqual({ value: 4096, source: 'config' })
+  })
+})
+
 /** A shim stand-in: `resolveModel` never opens a socket. */
 function stubShim(): ComateShim {
   return { baseUrl: () => 'http://127.0.0.1:1' } as unknown as ComateShim
 }
 
-/** The real adapter over a one-model catalog, with a live cap read. */
-function buildAdapter(readCap: () => number) {
+/** The real adapter over a one-model catalog, with a live per-model cap read. */
+function buildAdapter(readCap: (modelId: string) => number) {
   const catalog = new ComateCatalog()
   catalog.set([MODEL])
   return createComateAdapter({ shim: stubShim(), catalog, maxOutputTokens: readCap })
@@ -203,12 +307,45 @@ describe('the cap the harness actually reads', () => {
     expect((await comate.adapter.resolveModel(COMATE_PROVIDER, MODEL_ID)).defaultMaxTokens).toBe(77)
   })
 
-  it('keeps every served model on the same cap', async () => {
+  it('keeps every served model on the same cap when they share one', async () => {
     const catalog = new ComateCatalog()
     catalog.set([MODEL, { ...MODEL, id: 'test/model-second//public', name: 'model-second' }])
     const comate = createComateAdapter({ shim: stubShim(), catalog, maxOutputTokens: () => 4096 })
     for (const id of [MODEL_ID, 'test/model-second//public']) {
       expect((await comate.adapter.resolveModel(COMATE_PROVIDER, id)).defaultMaxTokens).toBe(4096)
     }
+  })
+
+  it('gives each model its own cap, and leaves an unlimited one out', async () => {
+    // 同一路由上的两个模型各用各的上限：一个 4096，另一个不设上限（`defaultMaxTokens`
+    // 必须是 undefined，harness 才不会给它物化出 `max_tokens`）。
+    const secondId = 'test/model-second//public'
+    const catalog = new ComateCatalog()
+    catalog.set([MODEL, { ...MODEL, id: secondId, name: 'model-second' }])
+    const caps: Record<string, number> = { [MODEL_ID]: 4096, [secondId]: COMATE_UNLIMITED_MAX_TOKENS }
+    const comate = createComateAdapter({
+      shim: stubShim(),
+      catalog,
+      maxOutputTokens: (modelId: string) => caps[modelId] ?? COMATE_DEFAULT_MAX_TOKENS,
+    })
+    expect((await comate.adapter.resolveModel(COMATE_PROVIDER, MODEL_ID)).defaultMaxTokens).toBe(4096)
+    expect((await comate.adapter.resolveModel(COMATE_PROVIDER, secondId)).defaultMaxTokens).toBeUndefined()
+  })
+
+  it('picks up a changed per-model cap once invalidate() is called', async () => {
+    // 真机上「保存」会走到 republish() → invalidate()，这就是卡片里改单个模型上限
+    // 后生效的那条路径。
+    let caps: Record<string, number> = { [MODEL_ID]: 4096 }
+    const catalog = new ComateCatalog()
+    catalog.set([MODEL])
+    const comate = createComateAdapter({
+      shim: stubShim(),
+      catalog,
+      maxOutputTokens: (modelId: string) => caps[modelId] ?? COMATE_DEFAULT_MAX_TOKENS,
+    })
+    expect((await comate.adapter.resolveModel(COMATE_PROVIDER, MODEL_ID)).defaultMaxTokens).toBe(4096)
+    caps = { [MODEL_ID]: COMATE_UNLIMITED_MAX_TOKENS }
+    comate.invalidate()
+    expect((await comate.adapter.resolveModel(COMATE_PROVIDER, MODEL_ID)).defaultMaxTokens).toBeUndefined()
   })
 })

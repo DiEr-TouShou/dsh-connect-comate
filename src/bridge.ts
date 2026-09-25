@@ -179,6 +179,14 @@ export interface ComateSettingsValue {
   enabledModelIds?: string[]
   /** Output-token cap: positive integer, or 0 for "no cap". */
   maxOutputTokens?: number
+  /**
+   * Per-model overrides of {@link ComateSettingsValue.maxOutputTokens}.
+   *
+   * Keyed by model id; value 0 means "no cap for this model". A model with no
+   * entry follows the global field, which is why an override can be removed by
+   * dropping the key rather than by writing the global value back into it.
+   */
+  maxOutputTokensByModel?: Record<string, number>
 }
 
 /**

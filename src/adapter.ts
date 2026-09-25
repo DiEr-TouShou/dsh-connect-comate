@@ -9,9 +9,10 @@
  *     （转引自 corrinehu/dsh-workbuddy-connect，MIT）实现并验证。
  * 改动：模型描述符的多模态由 Comate config 的 llm_types 判定
  *   （`llm-multimodal` → 图片输入），而非用户手动勾选；输出上限由
- *   `max-tokens.ts` 解析（配置字段 / env，0 = 不设上限），同时落进描述符的
- *   `maxTokens` 与 profile 的 `configuredMaxTokens`——只有后者会成为**真**上限
- *   （harness 的 `resolveCallWithInfo` 把它物化成 `config.maxTokens`）。
+ *   `max-tokens.ts` 解析（env / 每模型条目 / 全局字段，0 = 不设上限），同时落进
+ *   描述符的 `maxTokens` 与 profile 的 `configuredMaxTokens`——只有后者会成为**真**
+ *   上限（harness 的 `resolveCallWithInfo` 把它物化成 `config.maxTokens`），
+ *   而且**逐个模型**解析：同一路由上的两个模型可以各用各的上限。
  *   `llm_types` 在真机上是**数组**（本机 10 个模型里 5 个带多模态标记），
  *   归一化在 `auth.ts` 的 `parseLlmTypes`；出站图片的线形状修正在
  *   `multimodal.ts`（实测网关对裸字符串/假 base64/svg 会静默给空正文）。
@@ -106,8 +107,13 @@ export interface ComateAdapterOptions {
   /** Observe one assistant history message degrading to provider-neutral replay. */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
   /**
-   * Live read of the configured output cap: a positive integer, or `0` for
-   * "no cap at all".
+   * Live read of the configured output cap for ONE model: a positive integer,
+   * or `0` for "no cap at all".
+   *
+   * Per model because the cap is resolved per model (env → that model's own
+   * entry → the global field → the default): the descriptor's `maxTokens` and
+   * the profile's `configuredMaxTokens` entry must both be built from the same
+   * answer, and two models on this route can carry different ones.
    *
    * Live rather than a snapshot because the value comes from the settings
    * section: a saved change must apply to the next request, not the next
@@ -117,7 +123,7 @@ export interface ComateAdapterOptions {
    *
    * Defaults to {@link COMATE_DEFAULT_MAX_TOKENS} when omitted.
    */
-  maxOutputTokens?: () => number
+  maxOutputTokens?: (modelId: string) => number
 }
 
 /** What {@link createComateAdapter} hands back. */
@@ -242,15 +248,15 @@ export function comatePiModel(
 export function createComateAdapter(options: ComateAdapterOptions): ComateAdapter {
   const { shim, catalog } = options
 
-  /** Live read of the configured output cap; `0` means "no cap". */
-  const outputCap = (): number => options.maxOutputTokens?.() ?? COMATE_DEFAULT_MAX_TOKENS
+  /** Live read of the configured cap for one model; `0` means "no cap". */
+  const outputCap = (modelId: string): number =>
+    options.maxOutputTokens?.(modelId) ?? COMATE_DEFAULT_MAX_TOKENS
 
   const buildModels = (): Model<Api>[] => {
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    const cap = outputCap()
-    return catalog.current().map(info => comatePiModel(info, baseUrl, cap))
+    return catalog.current().map(info => comatePiModel(info, baseUrl, outputCap(info.id)))
   }
 
   const base = createProvider({
@@ -287,12 +293,15 @@ export function createComateAdapter(options: ComateAdapterOptions): ComateAdapte
     displayName: 'WPS Comate',
     streamIdleTimeoutMs: COMATE_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-connect-comate retryPolicy'),
-    // The real per-request cap. `dsh-llm-pi-ai`'s own profile docs: a
-    // `configuredMaxTokens` entry is materialized into a request that names no
-    // cap of its own — and the harness does exactly that in
-    // `resolveCallWithInfo` (`config.maxTokens = info.defaultMaxTokens`). An
-    // unlimited cap yields an empty map, so nothing is materialized at all.
-    configuredMaxTokens: comateConfiguredMaxTokens(catalog.current().map(info => info.id), outputCap()),
+    // The real per-request cap, one entry per model. `dsh-llm-pi-ai`'s own
+    // profile docs: a `configuredMaxTokens` entry is materialized into a request
+    // that names no cap of its own — and the harness does exactly that in
+    // `resolveCallWithInfo` (`config.maxTokens = info.defaultMaxTokens`). A model
+    // whose cap is unlimited yields no entry at all, so nothing is materialized
+    // for it while its neighbours keep theirs.
+    configuredMaxTokens: comateConfiguredMaxTokens(
+      catalog.current().map(info => [info.id, outputCap(info.id)] as const),
+    ),
     // Per-model failures gate every request: `modelOf` throws INVALID_CONFIG
     // for any id present here. The comate catalog is built from live reads,
     // so an empty map is the accurate answer — no known-bad model.

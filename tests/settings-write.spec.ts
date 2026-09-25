@@ -51,6 +51,7 @@ function fakeForm(initial: Record<string, unknown>, options: FormOptions = {}): 
             cookieOnly: live(stored.cookieOnly),
             enabledModelIds: live(stored.enabledModelIds),
             maxOutputTokens: live(stored.maxOutputTokens),
+            maxOutputTokensByModel: live(stored.maxOutputTokensByModel),
           }
       return { status: 'ready', writable: options.writable ?? true, value }
     },
@@ -91,6 +92,26 @@ describe('readComateValue', () => {
     for (const bad of ['32000', -1, 1.5, Number.NaN, null, true]) {
       expect(readComateValue(fakeForm({ maxOutputTokens: bad })).maxOutputTokens, `value=${String(bad)}`)
         .toBeUndefined()
+    }
+  })
+
+  it('reads the per-model cap map, 0 included', () => {
+    // 0 在每模型这一层同样是「这个模型不设上限」，必须原样读回来；live 引用也要剥。
+    const form = fakeForm({ maxOutputTokensByModel: { a: 4096, b: 0 } })
+    expect(readComateValue(form).maxOutputTokensByModel).toEqual({ a: 4096, b: 0 })
+  })
+
+  it('drops unusable per-model entries instead of the whole map', () => {
+    // 一条坏条目是「一个模型读不出来」，不能让其余模型一起丢设置；空字符串键
+    // 也不像模型 id，一并丢掉。
+    const form = fakeForm({ maxOutputTokensByModel: { a: 4096, b: -1, c: 'x', '': 1 } }, { liveRefs: false })
+    expect(readComateValue(form).maxOutputTokensByModel).toEqual({ a: 4096 })
+  })
+
+  it('reads anything that is not a map as "no overrides"', () => {
+    for (const bad of [undefined, null, 'x', 42, ['a'], true]) {
+      expect(readComateValue(fakeForm({ maxOutputTokensByModel: bad }, { liveRefs: false })).maxOutputTokensByModel,
+        `value=${String(bad)}`).toBeUndefined()
     }
   })
 
@@ -240,6 +261,53 @@ describe('writeComateSettings', () => {
       .catch((error: unknown) => error)
     expect((failure as ComateSettingsWriteError).code).toBe('not-persisted')
     expect((failure as ComateSettingsWriteError).field).toBe('maxOutputTokens')
+  })
+
+  it('writes the per-model cap map and verifies it', async () => {
+    const form = fakeForm({})
+    await expect(writeComateSettings(form, { maxOutputTokensByModel: { a: 4096, b: 0 } })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['maxOutputTokensByModel', { a: 4096, b: 0 }]])
+    expect(readComateValue(form).maxOutputTokensByModel).toEqual({ a: 4096, b: 0 })
+  })
+
+  it('removes an override by writing a map without it', async () => {
+    // 卡片清空某一格就是这样落盘的：整张 map 重写，少掉的那个键才真的消失。
+    const form = fakeForm({ maxOutputTokensByModel: { a: 4096, b: 8192 } })
+    await expect(writeComateSettings(form, { maxOutputTokensByModel: { b: 8192 } })).resolves.toBeUndefined()
+    expect(readComateValue(form).maxOutputTokensByModel).toEqual({ b: 8192 })
+  })
+
+  it('accepts an empty map as "no overrides at all"', async () => {
+    // 全部清空是合法状态（每个模型都跟随全局），不能被当成「空值」跳过或报错。
+    const form = fakeForm({ maxOutputTokensByModel: { a: 4096 } })
+    await expect(writeComateSettings(form, { maxOutputTokensByModel: {} })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['maxOutputTokensByModel', {}]])
+    expect(readComateValue(form).maxOutputTokensByModel).toBeUndefined()
+  })
+
+  it('raises not-persisted when a per-model entry came back different', async () => {
+    const form = fakeForm({}, { swallow: true })
+    form.put({ maxOutputTokensByModel: { a: 4096 } })
+    const failure = await writeComateSettings(form, { maxOutputTokensByModel: { a: 8192 } })
+      .catch((error: unknown) => error)
+    expect((failure as ComateSettingsWriteError).code).toBe('not-persisted')
+    expect((failure as ComateSettingsWriteError).field).toBe('maxOutputTokensByModel')
+  })
+
+  it('does not hand the Host the caller own object', async () => {
+    // 写出去的是副本：卡片那边的草稿不能被 Host 拿着当共享可变状态。
+    const form = fakeForm({})
+    const patch = { maxOutputTokensByModel: { a: 4096 } }
+    await expect(writeComateSettings(form, patch)).resolves.toBeUndefined()
+    expect(form.calls[0]![1]).not.toBe(patch.maxOutputTokensByModel)
+    expect(form.calls[0]![1]).toEqual({ a: 4096 })
+  })
+
+  it('leaves the stored per-model map alone when the patch omits it', async () => {
+    const form = fakeForm({ maxOutputTokensByModel: { a: 4096 }, enabledModelIds: [] })
+    await expect(writeComateSettings(form, { cookieOnly: true })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly'])
+    expect(readComateValue(form).maxOutputTokensByModel).toEqual({ a: 4096 })
   })
 
   it('leaves the stored cap alone when the patch omits it', async () => {

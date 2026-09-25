@@ -69,6 +69,13 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:10px;overflow:hidden;max-height:280px;overflow-y:auto}
 .dsm-comate-model{display:flex;flex-direction:column;gap:3px;padding:9px 12px;background:var(--dsw-alias-bg-layer-2,#232529)}
 .dsm-comate-model+.dsm-comate-model{border-top:1px solid var(--dsw-alias-border-l2,#3a3d45)}
+/* 一行 = 勾选/名称 + 右侧的该模型上限输入框。名称那一侧允许收缩（min-width:0），
+   否则长 id 会把输入框挤出容器；输入框固定宽度，不参与收缩。 */
+.dsm-comate-model-main{display:flex;align-items:center;gap:10px}
+.dsm-comate-model-main .dsm-comate-model-row{flex:1;min-width:0}
+.dsm-comate-model-cap{display:flex;align-items:center;gap:6px;flex:none}
+.dsm-comate-model-cap .dsm-comate-input{width:104px;flex:none;padding:4px 8px;font-size:12px}
+.dsm-comate-model-cap .dsm-comate-unit{font-size:11px}
 .dsm-comate-model-row{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--dsw-alias-label-primary,#e6e6e6);cursor:pointer}
 .dsm-comate-model-row input{margin:0}
 .dsm-comate-model-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Consolas,monospace;font-size:12px}
