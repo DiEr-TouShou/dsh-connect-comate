@@ -116,11 +116,22 @@
 
 ### 验收
 
-- 源码树真机：`thinking-levels-live` 3/3（`off` 归零、`xhigh` / `max` 接受、`none` 不等于 `off`）；
-  表一/表二的数字由 `thinking-probe-live` 在同一台机器上采到。
-- `verify:card` 70/70（跑的是真实构建产物 `lib/client.js`，jsdom 里按用户操作序列走）。
-- 安装产物（desktop profile，git 依赖指到 `v0.4.1-rc.4`）：`verify:installed`、`verify:card`、
-  `verify:shim` 与真机思考档位验收见本节末与 README「实机验证清单」。
+源码树与安装产物**各跑一遍**（源码树跑绿 ≠ 产物跑绿，0.3.2 就是这么翻车的）：
+
+| 检查 | 跑的是 | 结果 |
+| --- | --- | --- |
+| 默认套件 | 源码树 | 351 通过 / 8 跳过 |
+| `thinking-levels-live` | 源码树（真网关） | 3/3 |
+| `thinking-probe-live` | 真网关（证据采集器） | 表一/表二数字出自它 |
+| `verify:card` | **安装产物** `lib/client.js` | 70/70 |
+| `verify:shim` | **安装产物** 真 HTTP 全链路 5 模型 | 5/5 |
+| `verify:installed` | **安装产物** 图片矩阵 | 5/5 |
+| `thinking-levels-live` | **安装产物**（`../src/*` 改指 `lib/index.js`） | 3/3 |
+
+安装产物的 `lib/` 与源码树构建结果逐字节一致（6/6 md5），但上面的表并不因此就重复：
+产物验收验的是**接线**（设置 → 描述符 → 适配器），那是构建不会帮你验的部分。
+最后一行用一份临时 vitest 配置把 spec 里的 `../src/*.ts` 全部改指到安装产物的
+`lib/index.js`，于是**同一份验收 spec 跑的是产物**；那份配置没进版本库（一次性）。
 
 ## 0.4.1-rc.2 (2026-09-25)
 
