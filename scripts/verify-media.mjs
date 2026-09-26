@@ -22,6 +22,10 @@
  *      所以走 llmproxy 通道时插件**不需要**再实现 watermark.js / aigc-metadata.js；
  *      这一条一旦被上游改掉，插件就得自己补，因此值得断言。
  *
+ * 外加一段**零额度**的鉴权口径断言（`鉴权口径` 一节）：媒体端点只认 Cookie，
+ * `config.json` 里的 apiKey 一文不值。它是从插件方案的立论前提——若哪天 apiKey
+ * 开始被接受或被要求，**离线套件、单元测试、真机生图全都不会红**，只有这里会。
+ *
  * 跑法（需要登录态，默认不在 CI 里跑）：
  *   node scripts/verify-media.mjs                 # 只跑生图（快、省额度）
  *   COMATE_MEDIA_VIDEO=1 node scripts/verify-media.mjs   # 连生视频一起跑（实测约 2 分钟）
@@ -131,6 +135,107 @@ function mediaHeaders() {
 
 let failures = 0
 let checked = 0
+
+// ─────────────────────── 鉴权口径（零额度） ───────────────────────
+//
+// 断言从插件方案的立论前提：**媒体端点只认 Cookie，`config.json` 里的 apiKey
+// 一文不值**。做法是故意发非法请求——网关先校鉴权、后校参数，所以「鉴权被拒」
+// 与「鉴权过了但参数不合法」是两种可区分的回包，且**不产生任何生成费用**。
+//
+// 为什么值得进回归：这个前提一旦被上游改掉就**静默失效**。若哪天 apiKey 开始被
+// 接受、或被要求，从插件「凭据必须来自主插件那套」的设计就得重估，而离线套件、
+// 单元测试、真机生图**全都不会红**——只有这一段会。
+//
+// 断的是**关系**而不是具体数字：不写死 401，只要求「不带凭据被拒、带 cookie 不被拒、
+// 加上 Bearer 之后回包逐字不变」。这样上游把错误码从 401 改成 403 不会误报，
+// 而口径真的变了必然报。
+{
+  checked++
+  const problems = []
+  const notes = []
+
+  /** 鉴权被拒的状态码（401 与 403 都算「没通过」）。 */
+  const REJECTED = [401, 403]
+  const jsonOnly = { 'Content-Type': 'application/json' }
+
+  // 没有 `prompt` 的合法 JSON：网关先校鉴权、后校参数，所以这具 body 最多走到
+  // 「鉴权通过、参数不合法」，不会真的生成东西。刻意**不带** prompt 而不是给个
+  // 空串——空串有可能通过校验，那就真开始生成、真扣额度了。
+  const ILLEGAL_IMAGE_BODY = JSON.stringify({ n: 1 })
+
+  /** 发一个探针请求，回状态码与响应体。 */
+  const oracle = async (url, init) => {
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) })
+    return { status: response.status, body: await response.text() }
+  }
+
+  /** 报问题时把两种凭据都抹掉：错误体里偶尔会回显请求头。 */
+  const redact = text => String(text)
+    .split(credential.cookie).join('<COOKIE>')
+    .split(credential.cookie.replace('wps_sid=', '')).join('<SID>')
+    .split(credential.apiKey).join('<APIKEY>')
+    .slice(0, 160)
+
+  try {
+    const imagesUrl = `${base}/images/generations`
+    const videoUrl = `${base}/videos/__auth_oracle_nonexistent__`
+
+    const imagesBearer = await oracle(imagesUrl, {
+      method: 'POST', headers: { ...jsonOnly, authorization: `Bearer ${credential.apiKey}` }, body: ILLEGAL_IMAGE_BODY,
+    })
+    const imagesAnon = await oracle(imagesUrl, {
+      method: 'POST', headers: jsonOnly, body: ILLEGAL_IMAGE_BODY,
+    })
+    const imagesCookie = await oracle(imagesUrl, {
+      method: 'POST', headers: { ...jsonOnly, cookie: credential.cookie }, body: ILLEGAL_IMAGE_BODY,
+    })
+    const imagesBoth = await oracle(imagesUrl, {
+      method: 'POST', headers: { ...jsonOnly, cookie: credential.cookie, authorization: `Bearer ${credential.apiKey}` }, body: ILLEGAL_IMAGE_BODY,
+    })
+    const videoBearer = await oracle(videoUrl, { headers: { authorization: `Bearer ${credential.apiKey}` } })
+    const videoCookie = await oracle(videoUrl, { headers: { cookie: credential.cookie } })
+
+    notes.push(`images: Bearer=${imagesBearer.status} anon=${imagesAnon.status} Cookie=${imagesCookie.status} 两者=${imagesBoth.status}`)
+    notes.push(`videos: Bearer=${videoBearer.status} Cookie=${videoCookie.status}`)
+
+    // A：apiKey 在媒体端点上不改变任何东西——带它和不带的回包**逐字相同**。
+    if (imagesBearer.status !== imagesAnon.status || imagesBearer.body !== imagesAnon.body) {
+      problems.push(`Bearer 与「完全不带鉴权」回包不同（${imagesBearer.status} vs ${imagesAnon.status}）——apiKey 在媒体端点上不再被忽略，从插件的凭据前提要重估`)
+    }
+    // B：不带凭据必须被拒。
+    if (!REJECTED.includes(imagesAnon.status)) {
+      problems.push(`images 不带鉴权没被拒（HTTP ${imagesAnon.status}）`)
+    }
+    if (!REJECTED.includes(videoBearer.status)) {
+      problems.push(`videos 不带 cookie 没被拒（HTTP ${videoBearer.status}）`)
+    }
+    // C：cookie 才是有效凭据——带着它必须能过鉴权、进到业务层。
+    if (REJECTED.includes(imagesCookie.status)) {
+      problems.push(`images 带 cookie 也被拒（HTTP ${imagesCookie.status}）——cookie 不再是有效凭据`)
+    }
+    if (REJECTED.includes(videoCookie.status)) {
+      problems.push(`videos 带 cookie 也被拒（HTTP ${videoCookie.status}）——cookie 不再是有效凭据`)
+    }
+    // D：已经有 cookie 时再加 Bearer，回包应当**逐字不变**。
+    if (imagesCookie.status !== imagesBoth.status || imagesCookie.body !== imagesBoth.body) {
+      problems.push(`cookie 之外再加 Bearer 回包变了（${imagesCookie.status} vs ${imagesBoth.status}）——apiKey 开始起作用，与实测口径不一致`)
+    }
+    // E：两种凭据必须被区别对待，否则「只认 cookie」这句话就无从谈起。
+    if (imagesBearer.status === imagesCookie.status && imagesBearer.body === imagesCookie.body) {
+      problems.push('Bearer 与 cookie 回包相同——媒体端点不再区分两者')
+    }
+  } catch (error) {
+    problems.push(`探针请求失败: ${redact(error?.message ?? error)}`)
+  }
+
+  if (problems.length > 0) {
+    console.log(`FAIL auth   : ${problems.join('; ')}`)
+    failures++
+  } else {
+    console.log('ok   auth   : 零额度鉴权口径（Bearer 无效、cookie 有效）')
+    for (const note of notes) console.log(`             ${note}`)
+  }
+}
 
 // ─────────────────────────────── 生图 ───────────────────────────────
 {
