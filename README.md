@@ -153,6 +153,11 @@ node lib\bin.js doctor                               # storage=unreadable, probl
 # 源码树：两色图 + 断言两色都答出（只查「有正文」会放过「我读不到这张图」）
 WPS_COMATE_LIVE=1 npx vitest run tests/multimodal-live.spec.ts
 
+# 思考档位：开 off 后同一个请求形状真的带上 reasoning_effort=off 且思考归零；
+# xhigh / max 上游接受；none 与 off 分道扬镳。另有一个原始证据采集器（表一/表二的出处）：
+# WPS_COMATE_LIVE=1 npx vitest run tests/thinking-probe-live.spec.ts
+WPS_COMATE_LIVE=1 npx vitest run tests/thinking-levels-live.spec.ts
+
 # 安装产物：覆盖安装后跑这个。源码绿 ≠ 产物绿（0.3.2 就是这么翻车的）
 WPS_COMATE_SID=<sid> pnpm run verify:installed
 
@@ -165,10 +170,10 @@ COMATE_PKG_DIR=<插件安装目录> pnpm run verify:shim
 #   doctor 只报路径不报密钥 / 升级路径的两条拒绝条件）。不碰真实凭据与真实密钥文件
 pnpm run verify:sid-cipher
 
-# 卡片「启用的模型」勾选状态：在 jsdom 里跑**真实构建产物** lib/client.js，按用户的
-# 操作序列（打开 / 取消勾选 / 保存 / 退出 / 再进入）断言 DOM 上的勾选状态与汇总行。
-# 钉住的是「设置快照与模型目录两个异步源谁先到，草稿该怎么重新播种」——这一层类型
-# 检查和纯函数单测都看不见（0.4.0-rc.2 就是这么漏的：一进来全不勾）。
+# 卡片状态机：在 jsdom 里跑**真实构建产物** lib/client.js，按用户的操作序列断言 DOM：
+# 模型勾选状态（打开 / 取消勾选 / 保存 / 退出 / 再进入）、每模型输出上限、模型别名、
+# 思考档位勾选框。钉住的是「设置快照与模型目录两个异步源谁先到，草稿该怎么重新播种」——
+# 这一层类型检查和纯函数单测都看不见（0.4.0-rc.2 就是这么漏的：一进来全不勾）。
 # 需要 devDependencies 里的 jsdom + react-dom；若本仓库的 node_modules 承载不了它们
 # （它可能是指向已安装 profile 的链接），用 DSH_COMATE_CARD_DEPS 指向别的目录。
 # COMATE_PLUGIN_DIR=<插件安装目录> 则改为验安装产物（同 verify:sid-cipher）
@@ -192,13 +197,49 @@ base64，才是图片外置真正要钉住的东西。
 - 与命令行 `dsh plugin exec dsh-connect-comate check` **共用同一份实现**（`src/check.ts`），两边不会给出不一致的结论。
 - 探测用「启用中的第一个模型」（没有勾选任何模型时即目录第一个），也就是你实际会用到的那条路。
 
+## 模型别名（显示名）
+
+卡片「启用的模型」里每个模型右侧有一个别名输入框：空着就用上游发现的名字（框里的灰字就是那个名字），
+填了就以你填的为准。清空那一格就是撤销别名。
+
+**别名只改画什么，不改 id。** DSH 选择器画的是模型描述符的 `name`，而请求、设置文档、逐模型输出上限表
+用的都是 id——所以别名只落在 `name` 上，id 一字不动：给模型改个名不会弄丢它的输出上限，
+也不会让已保存的默认模型选择失效。
+
+解析规则由 `src/model-alias.ts` 提供，浏览器半（卡片）与宿主半读的是**同一份代码**：键和值都 trim，
+trim 后为空的键或值都不进表（空串不是「把名字改空」，而是「没有别名」）；值不是字符串的条目只丢自己，
+其余照用，并在宿主日志里说明丢的是哪个模型（否则界面上只剩一个空框，和「从没设过」长得一样）。
+
 ## 思考等级（thinking level）
 
-模型选择器里为 comate 模型提供思考等级：**minimal / low / medium / high**，以及选择器自带的「provider default」。
+模型选择器里为 comate 模型提供思考等级。**基础四档 minimal / low / medium / high 一直都在**，
+另外三档默认不出现，要你在卡片里手动勾选：
 
-映射来自本机实测（2026-09）：上游接受整条 OpenAI `reasoning_effort` 词汇表；不传参数时模型**默认就在思考**（基线每次都返回 `reasoning_content`）；`reasoning_effort` 的取值会原样发给上游。
+| 档位 | 勾选后发出的 `reasoning_effort` | 说明 |
+| --- | --- | --- |
+| Off | `off` | 真的关掉思考（本机 10 个模型里 7 个的 `reasoning_content` 归零） |
+| Xhigh | `xhigh` | 上游接受，但**测不出**与 `high` 的区别 |
+| Max | `max` | 同上 |
 
-> **「关闭思考」当前做不到，因此没有提供这个选项。** `dsh-llm-pi-ai` 会把 `off` 改写成「不传该选项」（`profileOptions()`：`reasoning === 'off' ? undefined : reasoning`），所以 `off` 永远到不了 pi-ai——请求不带参数、上游保持思考开启，而选择器却显示「off」。与其给一个名不副实的开关，不如让「provider default」如实表达「不发送参数」。（实测 `reasoning_effort: 'off'` 本身确实能让 `reasoning_content` 归零，是这个中间层拦住了它。）
+映射来自本机实测（2026-09-26，裸打上游、绕开适配器）：上游接受整条 OpenAI `reasoning_effort`
+词汇表；不传参数时模型**默认就在思考**（基线每次都返回 `reasoning_content`）；`reasoning_effort`
+的取值会原样发给上游。
+
+> **关思考的取值是 `off`，不是 `none`。** OpenAI 词汇表里表示「关」的是 `none`，但在这个网关上
+> `none` 会被接受（HTTP 200）却**一律被忽略**——10 个模型的 `reasoning_content` 全部停在基线长度
+> （201–1665 字符，没有一个归零）。真正让它归零的是 `off`。两个例外：`glm-5.3` / `glm-5.3-flash`
+> 收到 `off` 后思考反而更长（810→3059、660→1357），像是把不认识的取值当成了「放开想」；
+> `kimi-k3` 的基线本身就是 0，它不能作为 `off` 生效的证据。
+
+> **勾了 Off 会连带改掉「provider default」的含义。** `dsh-llm-pi-ai` 会把 `off` 改写成「不传该选项」，
+> 而选择器自带的「provider default」走的也是同一条不发参数的路。两个档位共享同一条出站形状，
+> 所以要让 Off 是真的 Off，就只能给 `thinkingLevelMap` 的 `off` 键一个具名线值（`off: 'off'`），
+> 「provider default」于是也跟着变成不思考。**这不是缺陷，是这条链路上「关闭」与「默认」不可兼得**——
+> 不勾这一档时两个位置都不出现，一切照旧。（这也是三档默认全不勾的原因：它们是插件不能替你拍的板。）
+
+> **Xhigh / Max 是「可选但未经证明」的档位。** 同一道题、每个档位跑两次：`high` 在 `deepseek-v4-pro`
+> 上是 536 与 722，同档位两次之间差 186，比档位之间的差距还大——所以放它们出来是照明确要求提供的选项，
+> 而不是默认值。
 
 
 ## 安装
