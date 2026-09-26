@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.0 (2026-09-26)
+
+> 一条「任务完成后不写标题」的修复：DSH 的标题请求固定 `max_tokens=64`，Comate 网关对
+> 多数推理模型把它当**总预算（含 thinking）**，标题任务的思考就耗尽 64 预算，
+> `finish_reason=length`、正文为空——DSH 把这次的失败静默吞掉，只剩 fallback 的首条
+> 消息截断标题。真机实测：deepseek-v4-pro / MiniMax-M3 / mimo-v2.5(-pro) / glm-5.2 /
+> glm-5.3 全挂，deepseek-v4.1-flash 思考波动、偶发失败。
+> 修法是 shim 识别标题请求（system 含固定文案 `Create a concise title`，普通任务请求
+> 一字不动）做两件事，**互为兜底**：预算提到 1024（`0.4.3-rc.1`，救思考量级在几百
+> token 内的模型），再注入 `reasoning_effort: off` 关掉思考（`0.4.3-rc.2`，救思考随
+> 预算膨胀的 mimo 系；glm-5.3 实测不吃任何关思考拼写，只认预算，由 rc.1 兜底）。
+> 0.5.0 = 0.4.2 之后的**全部**改动。已打 tag `v0.5.0` 并推 origin；
+> 安装：`github:DiEr-TouShou/dsh-connect-comate#v0.5.0`。未上 npm。
+
+### Bug Fixes
+
+- **DSH 标题生成静默失败**（`0.4.3-rc.1` + `0.4.3-rc.2`）：标题请求固定
+  `max_tokens=64`，Comate 网关对多数推理模型把 `max_tokens` 当总预算（含思考 token）。
+  修法落在 shim 新模块 `src/title-fix.ts`（零依赖、纯函数、不抛错）：
+  - **预算提升**（rc.1）：识别标题请求后把 `max_tokens` 提到 1024。实测各模型标题任务
+    思考量级约 100-300 token，1024 足够；deepseek-v4.1-flash 思考波动（~164 字符）不再
+    偶发失败。
+  - **关思考**（rc.2）：再注入 `reasoning_effort: off`。mimo-v2.5(-pro) 的思考随预算
+    膨胀（256→1121 字符、512→2189 字符仍 length），预算给多大思考吃多大、单独调预算
+    救不了；关掉思考直接出标题。DSH 现在不传 `reasoning_effort`，将来传了就尊重它
+    （不覆盖）。
+  - 识别特征：system 含 `Create a concise title`（忽略大小写/空白，兼容 content 数组）；
+    普通任务请求、格式怪异/非法 JSON 的请求全部原样放行。
+
+### 验收（合计）
+
+- 单测从 395 增至 **414 测试绿**：`title-fix.spec.ts` 新增 19 例（预算识别矩阵 + reasoning
+  注入 + 两者组合不丢字段 + 误伤/容错反向用例）。
+- 两个真机验证脚本（真凭据、真 shim、真网关）：`verify-title-fix-a.mjs` 打 rc.1 产物
+  5/6 模型出标题（mimo-v2.5 按预期 FAIL——它需要 reasoning off）、`verify-title-fix-b.mjs`
+  打 rc.2 产物 **7/7 全过**（v4-pro / v4.1-flash / MiniMax-M3 / mimo-v2.5-pro /
+  mimo-v2.5 / glm-5.2 / glm-5.3），且断言 shim 的 `warnings` 里确实出现
+  `budget raised 64 -> 1024` 与 `reasoning disabled` 两条。
+- 两条 `tsc` 配置无错。`verify:shim` 真凭据链路照旧通过。
+
 ## 0.4.2 (2026-09-26)
 
 > 一条安全边界 + 一条判断错误：**聊天错误的原文会带着上游凭据出 shim**（`0.4.2-rc.1`，
