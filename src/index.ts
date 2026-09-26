@@ -72,6 +72,8 @@ export {
 } from './bridge.ts'
 export {
   COMATE_CHECK_MAX_TOKENS,
+  COMATE_CHECK_READ_LIMIT,
+  COMATE_CHECK_TIMEOUT_MS,
   comateCheckBody,
   runComateCheck,
   safeMessage,

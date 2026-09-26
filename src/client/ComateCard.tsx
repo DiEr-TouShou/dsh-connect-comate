@@ -96,20 +96,28 @@ function describeOutcome(
   t: (key: ComateSettingsKey, params?: Record<string, unknown>) => string,
 ): CardNote {
   if (outcome.ok) {
-    return { tone: 'ok', text: t('row.testOk', { model: outcome.model ?? '' }) }
+    // A clean round trip that carried no text is still a pass: the probe caps
+    // output at a handful of tokens, so a thinking model can answer with
+    // nothing but reasoning. Saying 「失败」 there would be wrong; saying
+    // 「连接成功」 with no caveat would hide the fact.
+    return outcome.content === true
+      ? { tone: 'ok', text: t('row.testOkContent', { model: outcome.model ?? '' }) }
+      : { tone: 'ok', text: t('row.testOkNoContent', { model: outcome.model ?? '' }) }
   }
   // `reason` is set only when the probe never reached the network; those two
   // cases have actionable copy, unlike an upstream refusal.
   if (outcome.reason === 'no-credential') return { tone: 'error', text: t('row.testNoCredential') }
   if (outcome.reason === 'no-model') return { tone: 'error', text: t('row.testNoModel') }
-  return {
-    tone: 'error',
-    text: t('row.testFail', {
-      status: outcome.status ?? '-',
-      kind: outcome.kind ?? 'unknown',
-      message: outcome.message ?? '',
-    }),
+  const detail = {
+    status: outcome.status ?? '-',
+    kind: outcome.kind ?? 'unknown',
+    message: outcome.message ?? '',
   }
+  // 「凭据已通过」和「探测没跑完」是两件事。上游可能收下了凭据、然后在流里报错
+  // （积分不足、会话失效），也可能收了凭据什么都不回——这时一句笼统的「失败」
+  // 会把人推去重填 sid，而上游那句话才是该看的。
+  if (outcome.accepted === true) return { tone: 'error', text: t('row.testIncomplete', detail) }
+  return { tone: 'error', text: t('row.testFail', detail) }
 }
 
 /** Render one inline action result, toned by outcome. */

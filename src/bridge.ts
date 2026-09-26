@@ -327,10 +327,45 @@ export interface ComateCatalogAnswer {
 /** Why a probe could not run at all (as opposed to running and failing). */
 export type ComateCheckReason = 'no-credential' | 'no-model'
 
-/** What one probe request observed. */
+/**
+ * What one probe request observed, as three separate facts.
+ *
+ * v0.4.2-rc.3: the probe used to answer a single boolean derived from the HTTP
+ * status alone — anything 2xx read as 「连接成功」, including an empty body and a
+ * stream whose first event was an error. The three facts below are what the
+ * gateway actually has to say, in the order it says them:
+ *
+ *   1. {@link accepted}  — it took the credential (HTTP 200, and no event in the
+ *      stream said the session was dead).
+ *   2. {@link completed} — the stream reached a clean end without an in-stream
+ *      error, so a full round trip happened.
+ *   3. {@link content}   — at least one non-empty assistant text delta arrived.
+ *
+ * {@link ok} is 1 ∧ 2. Fact 3 is reported but never required: the probe caps
+ * output at a handful of tokens, and a thinking model can legitimately spend
+ * them all on reasoning and emit no text at all — calling that a broken
+ * connection would be wrong.
+ */
 export interface ComateCheckOutcome {
-  /** Whether the upstream accepted the credential and started a stream. */
+  /** `accepted && completed`: the probe finished a clean round trip. */
   ok: boolean
+  /**
+   * The gateway took the credential: HTTP 200 came back, at least one SSE event
+   * arrived, and none of them was an authentication failure.
+   *
+   * `false` is not the same as 「凭据是坏的」: an empty 200 proves nothing either
+   * way, and that is the point of separating this from `ok`.
+   */
+  accepted?: boolean
+  /** The stream ended on its own terms (`[DONE]`, `finish_reason`, or EOF). */
+  completed?: boolean
+  /** A non-empty assistant text delta arrived. */
+  content?: boolean
+  /**
+   * Reasoning-only output was seen. Diagnostic: it explains a successful probe
+   * that carried no `content`, and is never part of `ok`.
+   */
+  reasoning?: boolean
   /**
    * Why the probe never reached the network. Set by the host when it could not
    * assemble a credential or pick a model; absent whenever the request ran, even
@@ -339,11 +374,14 @@ export interface ComateCheckOutcome {
   reason?: ComateCheckReason
   /** The model the probe used. */
   model?: string
-  /** HTTP status, present when the upstream answered non-2xx. */
+  /** HTTP status: the refusal's, or 200 for a failure found inside the stream. */
   status?: number
-  /** Classified failure kind, present when the upstream answered non-2xx. */
+  /** Classified failure kind: the refusal's, or the in-stream error's. */
   kind?: UpstreamErrorKind
-  /** Redacted, length-capped upstream excerpt or transport error. */
+  /**
+   * Redacted, length-capped detail: the upstream excerpt or transport error on
+   * failure, and why the read stopped short on a probe that did not complete.
+   */
   message?: string
 }
 

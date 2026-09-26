@@ -177,6 +177,15 @@ pnpm run verify:sid-cipher
 # 默认 import 已安装产物，同 verify:sid-cipher
 pnpm run verify:redaction
 
+# 探测结论（七个用例）：拿本地桩当上游，把「假成功」的六种形状各喂一遍——干净往返 /
+# 空正文的 200 / 流内带 error 的 200 / 只回状态行然后挂着 / 有事件但流不结束 / 上游根本
+# 不应答 / 上游非 2xx 拒绝。断言的是 `ok` **和** accepted/completed/content 三个分段事实
+# （只判 ok 会漏掉「凭据通过但探测没跑完」这一档）。**不需要登录态**（上游是本地桩）：
+# 假成功是判断错误，不该只在有账号的机器上才被检查。
+# 默认 import 已构建的 lib/；COMATE_PKG_DIR=<插件安装目录> 则改为验安装产物，
+# 这是反向对照用的入口（打旧产物应当变红：0.4.2-rc.2 → 1/7）
+pnpm run verify:probe
+
 # 卡片状态机：在 jsdom 里跑**真实构建产物** lib/client.js，按用户的操作序列断言 DOM：
 # 模型勾选状态（打开 / 取消勾选 / 保存 / 退出 / 再进入）、每模型输出上限、模型别名、
 # 思考档位勾选框。钉住的是「设置快照与模型目录两个异步源谁先到，草稿该怎么重新播种」——
@@ -198,11 +207,26 @@ base64，才是图片外置真正要钉住的东西。
 
 ## 测试连接
 
-卡片动作行的「测试连接」发**一次最小请求**（`max_tokens: 8`、`stream: true`、单条 `ping`）验证凭据，结果就地显示（成功并给出所用模型 / 失败并给出 HTTP 状态、错误分类与脱敏后的上游原文）。
+卡片动作行的「测试连接」发**一次最小请求**（`max_tokens: 8`、`stream: true`、单条 `ping`）验证凭据，结果就地显示。
 
-> 已知局限（待修，见 `0.4.2` 之后的工作项）：这一步目前**只看 HTTP 状态码**——空正文的
-> 200、或者流里带着 `error` 事件的 200，都会被报成「连接成功」。所以它现在回答的是
-> 「凭据被接受了吗」，而不是「这个模型能出话」。
+结论不再是「成功 / 失败」一个布尔，而是上游按顺序给出的三个事实：
+
+| 事实 | 含义 | 怎么看出来 |
+| --- | --- | --- |
+| `accepted` | 网关收下了凭据 | HTTP 200，且流里没有任何事件说会话失效 |
+| `completed` | 一次完整往返跑完了 | 流自己结束（`[DONE]` / `finish_reason` / EOF），且流内没有 `error` |
+| `content` | 真的收到了文本 | 至少一个非空的助手文本 delta |
+
+`ok = accepted ∧ completed`，卡片上对应三句话：**成功**（三者齐）、**成功但没文本**、
+**凭据已通过、但探测没跑完**（典型是「HTTP 200 + 流内 `error`」，比如积分不足、会话失效
+——这时上游那句话才是该看的，而不是一句笼统的失败）。`content` 不参与 `ok` 的判定：
+探测只给 8 个输出 token，思考型模型完全可能把它们全花在思考上、一个文本字都不出，
+把这判成「连接坏了」是错的。
+
+探测有**总超时**（`COMATE_CHECK_TIMEOUT_MS` = 15s，覆盖请求与读取两个阶段）：只读有限
+个事件就停（`COMATE_CHECK_READ_LIMIT` = 64 KiB），上游只回状态行然后挂着、或者连状态行
+都不回，都不会让这一步悬着不返回。只回状态行就静默的 200 报的是「凭据已通过、但探测
+没跑完」，不是成功。（两个都是编译期常量；函数入口另有 `timeoutMs` 选项供测试用。）
 
 - 用的是**当前草稿**的 `wps_sid` 与 `cookieOnly`，所以**可以先测再存**——粘错值不会先写进设置文档；草稿只作用于那一次请求，不落盘。
 - 与命令行 `dsh plugin exec dsh-connect-comate check` **共用同一份实现**（`src/check.ts`），两边不会给出不一致的结论。
@@ -316,7 +340,7 @@ curl -X POST -H 'content-type: application/json' \
 curl -X POST -H 'content-type: application/json' \
   -d '{"wpsSid":"粘贴sid值","cookieOnly":false}' \
   http://127.0.0.1:<DSH web 端口>/plugins/dsh-connect-comate/__check
-# {"ok":true,"model":"41000207/deepseek/deepseek-v4-flash//public"}
+# {"ok":true,"accepted":true,"completed":true,"content":true,"model":"41000207/deepseek/deepseek-v4-flash//public"}
 ```
 
 - `providerRegistered` 为 `false` 而 `signedIn` 为 `true`，说明 loopback 监听起来了、但 `comate`
@@ -373,7 +397,10 @@ pnpm run check   # typecheck + test + build
 ## 实机验证清单
 
 1. `node lib/bin.js doctor` —— 应显示 `valid=true` 且列出 baseUrl 与 8 个模型；`Manual wps_sid` 应为 `unset`（未填时），`wpsSidStorage` 同步为 `unset`。
-2. 填入 wpsSid 后 `node lib/bin.js check`（或 `dsh plugin exec ... check`）—— 输出 `OK` 表示上游接受凭据。
+2. 填入 wpsSid 后 `node lib/bin.js check`（或 `dsh plugin exec ... check`）—— 输出 `OK` 表示
+   「凭据已通过 + 往返跑完」（`OK: credential accepted, stream completed, content received`；
+   若往返跑完但没文本，会明说 `but no text arrived`）；`INCOMPLETE` 表示上游收下了凭据但
+   探测没跑完（附 HTTP 状态、分类与脱敏后的上游原文）；`FAIL` 才是凭据/上游拒绝。
 3. 密文链路自查（两条独立的通道，各自都能单独跑）：
    - **卡片通道**：在卡片里保存一次 wps_sid → 状态行应显示「已配置（密文保存）」；直接看 profile 的 `cordis.patch.yml`，`wpsSid` 应是一串 `enc:v1:…` 而**不是** `V02…` 开头的明文。把密钥文件改名后重开卡片，状态行应变成「本机解不开」并带出 `key-missing` 原因（宿主把这份判定随目录路由一起下发，浏览器自己看不出差别）。
    - **CLI 通道**：按上面「保存方式」一节的环境变量脚本走一遍 `seal` → `doctor`（`sealed`）→ 移走密钥文件 → `doctor`（`unreadable` + `key-missing`）。注意 `doctor` 读的是 `WPS_COMATE_SID`，看不到卡片存的那份值——这不是缺陷，是独立进程读不到 DSH 设置文档。

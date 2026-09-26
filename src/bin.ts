@@ -23,7 +23,7 @@ import {
   defaultConfigCandidates,
 } from './auth.ts'
 import { isSealedComateSecret } from './bridge.ts'
-import { runComateCheck, safeMessage } from './check.ts'
+import { COMATE_CHECK_MAX_TOKENS, runComateCheck, safeMessage } from './check.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import { COMATE_CONNECT_VERSION } from './version.ts'
 
@@ -153,8 +153,24 @@ async function check(): Promise<number> {
     model: model.id,
   })
   if (outcome.ok) {
-    process.stdout.write(`OK: upstream accepted the credential (HTTP 200, SSE stream started; model=${model.id})\n`)
+    process.stdout.write(
+      outcome.content === true
+        ? `OK: credential accepted, stream completed, content received (model=${model.id})\n`
+        : `OK: credential accepted, stream completed, but no text arrived`
+          + ` (model=${model.id}; the probe caps output at ${COMATE_CHECK_MAX_TOKENS} tokens`
+          + `${outcome.reasoning === true ? ', reasoning only' : ''})\n`,
+    )
     return 0
+  }
+  // 「凭据已通过」与「探测失败」是两件事：上游可能收下了凭据，然后在流里报错（积分
+  // 不足、会话失效），也可能收了凭据什么都不回。前者能给出的 actionable 信息是上游
+  // 那句话，不该被一句笼统的 FAIL 盖掉。
+  if (outcome.accepted === true) {
+    process.stdout.write(
+      `INCOMPLETE: the credential was accepted, but the probe did not finish`
+      + ` — HTTP ${outcome.status} [${outcome.kind}]: ${(outcome.message ?? '').slice(0, 300)}\n`,
+    )
+    return 1
   }
   process.stdout.write(`FAIL: HTTP ${outcome.status} [${outcome.kind}]: ${(outcome.message ?? '').slice(0, 300)}\n`)
   process.stdout.write('If the cookie looks right and this still 401s, try cookieOnly (cookie-only auth) or re-copy the sid.\n')

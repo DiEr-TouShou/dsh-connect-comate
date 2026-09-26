@@ -108,6 +108,9 @@ const KIMI = IDS[4]
 
 let catalogAnswer = () => ({ ok: true, models: CATALOG })
 
+// 探测路由的答复。可替换，好让「测试连接」的四句话各演一遍。
+let checkAnswer = () => ({ ok: true, accepted: true, completed: true, content: true, model: IDS[0] })
+
 // ---------------------------------------------------------------- jsdom + React
 // `requireFrom` 与 DOM 依赖同源，这样 bundle 自己那句 `require('react')` 拿到的就是
 // react-dom 渲染用的那一个 React 实例——两份 React 会让每个 hook 调用都失败。
@@ -144,7 +147,11 @@ globalThis.fetch = async (url) => {
     const answer = catalogAnswer()
     return { ok: true, status: 200, json: async () => ({ signedIn: answer.ok, models: answer.models, sidStorage: 'sealed' }) }
   }
-  if (href.includes('__check')) return { ok: true, status: 200, json: async () => ({ ok: true, model: IDS[0] }) }
+  // A probe answer as the host now sends it: `ok` alone no longer says whether
+  // text came back, so the stub carries the three facts the card renders from.
+  if (href.includes('__check')) {
+    return { ok: true, status: 200, json: async () => checkAnswer() }
+  }
   return { ok: false, status: 404, json: async () => ({}) }
 }
 
@@ -233,6 +240,11 @@ function registerCard(form) {
           'row.discard': '撤销修改',
           'row.test': '测试连接',
           'row.clear': '清除已存的 sid',
+          // 探测四句话用占位文案，好让断言直接盯住「哪一句被选中」。
+          'row.testOkContent': 'NOTE-CONTENT:{model}',
+          'row.testOkNoContent': 'NOTE-NO-CONTENT:{model}',
+          'row.testIncomplete': 'NOTE-INCOMPLETE:{status}/{kind}/{message}',
+          'row.testFail': 'NOTE-FAIL:{status}/{kind}/{message}',
           'row.expand': '展开',
           'row.collapse': '收起',
         }
@@ -616,6 +628,48 @@ console.log('\n19. 撤销修改把别名与档位一起还原')
   await act(async () => { buttonByText(container, '撤销修改').click() })
   expectEqual('别名回到已存的样子', aliasValues(container), ['A', '', '', '', ''])
   expectEqual('档位回到已存的样子', levelChecked(container), [false, true, false])
+}
+
+console.log('\n20. 测试连接：成功 / 通过但没文本 / 凭据通过但没跑完 / 上游拒绝，四句话必须各归各位')
+{
+  // 探测结论曾经只有一个布尔，于是「HTTP 200 但流内报错」也被念成「连接成功」。
+  // 现在卡片按 accepted / completed / content 三个事实挑句子，这里逐句钉住。
+  const noteText = (container) => {
+    // 取最后一个：卡片里还有别的 Note（sid 迁移、刷新模型列表），探测那句排在它们后面。
+    const nodes = [...container.querySelectorAll('.dsm-comate-saved, .dsm-comate-error')]
+    return nodes.length === 0 ? null : nodes[nodes.length - 1].textContent
+  }
+  const { container } = await open({
+    stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [KIMI], maxOutputTokens: 0 },
+  })
+  const probeWith = async (answer) => {
+    checkAnswer = () => answer
+    await act(async () => { buttonByText(container, '测试连接').click() })
+    await act(async () => { await tick(30) })
+    return noteText(container)
+  }
+
+  expectEqual(
+    '干净往返',
+    await probeWith({ ok: true, accepted: true, completed: true, content: true, model: IDS[0] }),
+    `NOTE-CONTENT:${IDS[0]}`,
+  )
+  expectEqual(
+    '通过、但没有文本',
+    await probeWith({ ok: true, accepted: true, completed: true, content: false, model: IDS[0] }),
+    `NOTE-NO-CONTENT:${IDS[0]}`,
+  )
+  expectEqual(
+    '凭据通过、往返没跑完（HTTP 200 + 流内报错就是这一档）',
+    await probeWith({ ok: false, accepted: true, completed: false, status: 200, kind: 'server', message: 'stream died' }),
+    'NOTE-INCOMPLETE:200/server/stream died',
+  )
+  expectEqual(
+    '上游拒绝',
+    await probeWith({ ok: false, accepted: false, status: 402, kind: 'hard_credit', message: '积分不足' }),
+    'NOTE-FAIL:402/hard_credit/积分不足',
+  )
+  checkAnswer = () => ({ ok: true, accepted: true, completed: true, content: true, model: IDS[0] })
 }
 
 console.log(`\n${checks - failures.length}/${checks} 条断言通过`)
