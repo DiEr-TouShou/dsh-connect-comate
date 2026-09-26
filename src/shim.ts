@@ -25,7 +25,7 @@ import type { ComateAssetUploader } from './assets.ts'
 import type { ComateCatalog } from './catalog.ts'
 import { emptyImageStats, emptyUploadStats, uploadChatImages } from './multimodal.ts'
 import { safeMessage } from './redact.ts'
-import { applyTitleBudgetFix } from './title-fix.ts'
+import { applyTitleBudgetFix, applyTitleReasoningFix } from './title-fix.ts'
 import { prepareChatBody, ComateUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -280,7 +280,9 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
     // 形式，再外置（异步、有网）把它换成可抓取 URL。
     let prepared = prepareChatBody(raw, imageStats)
     // DSH 标题请求固定 max_tokens=64，对推理模型是总预算、思考就会吃光（空正文 →
-    // 标题静默失败）。识别标题请求把预算提到 1024（方案 A）；未命中一字不动。
+    // 标题静默失败）。识别标题请求做两件事：预算提到 1024（方案 A，mimo 系除外——
+    // 它的思考随预算膨胀），再注入 reasoning_effort=off 关掉思考（方案 B，glm-5.3
+    // 不吃 off 只认预算，两者互为兜底）。未命中一字不动。
     const titleFix = applyTitleBudgetFix(prepared)
     if (titleFix.matched && titleFix.before !== undefined && titleFix.after !== undefined) {
       logger?.warn(
@@ -288,6 +290,11 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
       )
     }
     prepared = titleFix.body
+    const titleReasoning = applyTitleReasoningFix(prepared)
+    if (titleReasoning.injected) {
+      logger?.warn('dsh-connect-comate: title request reasoning disabled (reasoning_effort: off)')
+    }
+    prepared = titleReasoning.body
     try {
       prepared = await uploadChatImages(prepared, uploader, credential, uploadStats)
     } catch (error: unknown) {

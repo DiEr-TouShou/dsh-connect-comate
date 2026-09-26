@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 import {
   COMATE_TITLE_MAX_TOKENS,
   applyTitleBudgetFix,
+  applyTitleReasoningFix,
 } from '../src/title-fix.ts'
 
 const TITLE_SYSTEM = [
@@ -167,5 +168,72 @@ describe('applyTitleBudgetFix', () => {
     const r = applyTitleBudgetFix(source)
     expect(r.matched).toBe(false)
     expect(r.body).toBe(source)
+  })
+})
+
+describe('applyTitleReasoningFix', () => {
+  it('injects reasoning_effort: "off" on the DSH title request', () => {
+    const r = applyTitleReasoningFix(titleBody(64))
+    expect(r.matched).toBe(true)
+    expect(r.injected).toBe(true)
+    expect(r.existing).toBeUndefined()
+    const parsed = JSON.parse(r.body) as { reasoning_effort: string }
+    expect(parsed.reasoning_effort).toBe('off')
+  })
+
+  it('does not overwrite an existing reasoning_effort', () => {
+    const source = titleBody(64).replace('"stream":true', '"reasoning_effort": "high", "stream":true')
+    const r = applyTitleReasoningFix(source)
+    expect(r.matched).toBe(true)
+    expect(r.injected).toBe(false)
+    expect(r.existing).toBe('high')
+    expect(r.body).toBe(source)
+  })
+
+  it('does not touch a normal task request', () => {
+    const body = JSON.stringify({
+      model: 'x',
+      messages: [
+        { role: 'system', content: 'You are an AI coding assistant.' },
+        { role: 'user', content: 'hi' },
+      ],
+      stream: true,
+      max_tokens: 64,
+    })
+    const r = applyTitleReasoningFix(body)
+    expect(r.matched).toBe(false)
+    expect(r.injected).toBe(false)
+    expect(r.body).toBe(body)
+  })
+
+  it('matches regardless of case and whitespace', () => {
+    const body = JSON.stringify({
+      model: 'x',
+      messages: [
+        { role: 'system', content: '  CREATE   a   concise  TITLE for this session. ' },
+        { role: 'user', content: 'hi' },
+      ],
+      max_tokens: 64,
+    })
+    const r = applyTitleReasoningFix(body)
+    expect(r.injected).toBe(true)
+  })
+
+  it('returns the source unchanged on malformed JSON', () => {
+    const r = applyTitleReasoningFix('nope{')
+    expect(r.matched).toBe(false)
+    expect(r.injected).toBe(false)
+    expect(r.body).toBe('nope{')
+  })
+
+  it('budget and reasoning fixes compose without dropping fields', () => {
+    const budgeted = applyTitleBudgetFix(titleBody(64))
+    expect(budgeted.after).toBe(COMATE_TITLE_MAX_TOKENS)
+    const reasoned = applyTitleReasoningFix(budgeted.body)
+    const parsed = JSON.parse(reasoned.body) as { max_tokens: number; reasoning_effort: string }
+    expect(parsed.max_tokens).toBe(COMATE_TITLE_MAX_TOKENS)
+    expect(parsed.reasoning_effort).toBe('off')
+    // 原有字段一个不少
+    expect(JSON.parse(reasoned.body)['model']).toBe('600085158/zhipu/glm-5.3//public')
   })
 })

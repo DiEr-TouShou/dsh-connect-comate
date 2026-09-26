@@ -2,7 +2,7 @@
   "name": "dsh-connect-comate",
   "displayName": "DSH Connect WPS Comate",
   "description": "Connect the locally signed-in WPS Comate account to DeepSeek Harness as a model provider, via a secure loopback shim (reverse-proxy style). 通过安全回环 shim（反向代理），把本机已登录的 WPS Comate 账号接入 DeepSeek Harness 作为模型来源。",
-  "version": "0.4.3-rc.1",
+  "version": "0.4.3-rc.2",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
