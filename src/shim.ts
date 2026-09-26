@@ -25,6 +25,7 @@ import type { ComateAssetUploader } from './assets.ts'
 import type { ComateCatalog } from './catalog.ts'
 import { emptyImageStats, emptyUploadStats, uploadChatImages } from './multimodal.ts'
 import { safeMessage } from './redact.ts'
+import { applyTitleBudgetFix } from './title-fix.ts'
 import { prepareChatBody, ComateUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -278,6 +279,15 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
     // 两遍，顺序不能倒：先归一化（同步、纯）把图片收成「对象形状 + 真 base64」一种
     // 形式，再外置（异步、有网）把它换成可抓取 URL。
     let prepared = prepareChatBody(raw, imageStats)
+    // DSH 标题请求固定 max_tokens=64，对推理模型是总预算、思考就会吃光（空正文 →
+    // 标题静默失败）。识别标题请求把预算提到 1024（方案 A）；未命中一字不动。
+    const titleFix = applyTitleBudgetFix(prepared)
+    if (titleFix.matched && titleFix.before !== undefined && titleFix.after !== undefined) {
+      logger?.warn(
+        `dsh-connect-comate: title request budget raised ${titleFix.before} -> ${titleFix.after}`,
+      )
+    }
+    prepared = titleFix.body
     try {
       prepared = await uploadChatImages(prepared, uploader, credential, uploadStats)
     } catch (error: unknown) {
