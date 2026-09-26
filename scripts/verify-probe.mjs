@@ -19,6 +19,18 @@
  *   node scripts/verify-probe.mjs
  *   COMATE_PKG_DIR="<插件安装目录>" node scripts/verify-probe.mjs
  *
+ * 反向对照（证明这个脚本真的会变红）：把某个旧产物的 `lib/` 与 `package.json` 拷到
+ * 仓库内的临时目录再打向它——**必须在仓库内**，否则旧产物 import 的
+ * `@deepseek-ai/schemastery` 解析不到（放到仓库外会直接 ERR_MODULE_NOT_FOUND，
+ * 那不是对照，是环境错）：
+ *
+ *   D=.rc2-control; mkdir -p $D/lib && cp <旧产物>/lib/* $D/lib/ && cp <旧产物>/package.json $D/
+ *   COMATE_PKG_DIR="$PWD/$D" node scripts/verify-probe.mjs
+ *
+ * 0.4.2-rc.2 的产物在这份脚本下是 **1/7**：五条实际结果是
+ * `{"ok":true,"model":"model-a"}`（空正文、流内 error、静默的 200 全被判成成功），
+ * 第六条由看门狗判 FAIL，证明它缺总超时。
+ *
  * 退出码 0 = 7/7 通过。
  */
 import { existsSync } from 'node:fs'
