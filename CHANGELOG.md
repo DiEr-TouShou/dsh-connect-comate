@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.2-rc.1 (2026-09-26)
+
+> 一次安全边界修复：**聊天错误的原文不脱敏**。上游网关的错误正文里可能回显请求头、
+> 回显 `Cookie`、或者把请求 URL 抄回来，之前这些字节会被原样写进下游的错误 JSON，
+> 等于把真实凭据交给 pi-ai 与浏览器面板。
+
+### Bug Fixes
+
+- **shim 的下游错误 JSON 原样携带上游凭据**（真机复现）：三条出口全部受影响——
+  上游拒绝（`writeOpenAIError` 转发上游原文）、凭据解析失败（`not_signed_in`）、
+  handler 内部异常（`internal` 500）。
+
+  根因不是「忘了调脱敏函数」，而是**脱敏装错了地方**：只有按按钮才走一次的 `check.ts`
+  有这层，每次聊天都走的 `shim.ts` 没有——低频那条路上了锁，高频那条门开着。所以修法
+  不是给三个调用点各加一行，而是把**唯一出口**收口：`writeOpenAIError` 内部统一过
+  `safeMessage`。写死的常量过一遍无害（规则对 `[redacted]` 幂等），漏掉一个分支的代价
+  却是一次凭据外泄。
+
+- **脱敏规则本身覆盖不全**：旧规则只认 JWT、`key=value`、`wps_sid=` 三种形状，
+  `Authorization: Bearer sk-live-…` 与 JSON 的 `{"token":"…"}` **原样通过**。规则搬到零依赖的
+  `src/redact.ts`（与 `model-alias.ts` 同一套路），`check.ts` / `shim.ts` / `web-status.ts`
+  共用一份，并补齐 Bearer/Basic、JWT、`k=v` / `"k":"v"` / `k: v` 三种拼写、
+  `sk-` / `ghp_` / `xoxb-` 等已知前缀。
+
+  两条规则是**故意**这样写的，都写进了测试：
+
+  - `\b` 词边界不能去。去掉它 `risk-management-system` 会命中 `sk-management-…`，
+    正常英文开始凭空消失。
+  - 裸 `key: value` 只在值**像凭据**（无空格且 ≥ 8 字符）时才动。
+    否则 `cannot seal the secret: the key file is …` 里的 `secret: the` 会被当成 YAML 凭据。
+    代价是 `Authorization: abc123` 这种又短又没前缀的会漏——属于本模块开头就声明的
+    「无键名、无已知前缀的裸凭据识别不了」那一类限制。
+  - `code` 是唯一带例外的键：网关把会话失效写成 `code=12153`，那个数字是用户要去搜的、
+    也是本插件 `classifyUpstreamError` 自己认的标记。只放行「纯数字 ≤ 6 位」，
+    `code=<非数字>` 照旧当秘密。
+  - `cookie` / `set-cookie` **不在**键名表里：它们是容器头，匹配整头会把值全吞掉
+    （`Cookie: [redacted]`）而看不出是哪个成员漏了；成员永远是 `k=v`，逐条抹即可。
+
+- **截断发生在脱敏之前**：上游原文原来先 `.slice(0, 400)` 再写进错误 JSON。跨在截断点上的
+  令牌会被切掉一半而认不出来，而半个真凭据也是凭据。现在先脱敏、后截断（`safeMessage`
+  自己做，上限 500）。
+
+### 验收
+
+- `tests/redact.spec.ts`（20 例，零依赖模块的规则矩阵 + 幂等 + 不误伤正常文本）
+- `tests/shim-redaction.spec.ts`（5 例，真 shim 真 HTTP 回环，钉住三条出口的**出口字节**）
+- `pnpm run verify:redaction`（**针对已构建产物**的验收，**不需要登录态**——脱敏是安全边界，
+  不该只在有账号的机器上才被检查）：3/3。
+
+  反向对照已做：同一个脚本跑修复前的已安装产物，**3/3 全部 FAIL**，四个合成凭据
+  （`wps_sid` / Bearer / token / JWT）在三条出口上全部原样出现。
+
 ## 0.4.1 (2026-09-26)
 
 > 三件「默认不动、用户自己按需打开」的能力：**逐模型输出上限**（`0.4.1-rc.1`）、

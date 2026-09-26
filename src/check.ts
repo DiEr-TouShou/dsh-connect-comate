@@ -3,15 +3,19 @@
  * plugin card's 「测试连接」 action.
  *
  * 参考：dingminhua/dsh-connect-workbuddy（MIT，Copyright (c) 2026 LaoDing）
- *   — `safeMessage` 的脱敏规则与「一次最小请求验证凭据」的做法沿用自该项目。
+ *   — 「一次最小请求验证凭据」的做法沿用自该项目。
  * 改动：把这段逻辑从 `bin.ts` 抽出来，让命令行与卡片走同一份实现——两处各写
  *   一遍的话，卡片测通、命令行测不通（或反之）会变成无法复现的「玄学问题」。
+ *   v0.4.2：脱敏规则从本模块搬到零依赖的 `./redact.ts`（规则本身也补齐了
+ *   Bearer / JSON 形状），因为常驻聊天路径 `shim.ts` 也要用同一份——规则留在这里
+ *   的话 shim 要么引不到、要么得抄一份。`safeMessage` 从这里再导出，保持既有 API。
  *
  * @module dsh-connect-comate/check
  */
 
 import type { ComateCredential } from './auth.ts'
 import type { ComateCheckOutcome } from './bridge.ts'
+import { safeMessage } from './redact.ts'
 import type { ComateUpstreamClient } from './upstream.ts'
 
 /**
@@ -21,32 +25,16 @@ import type { ComateUpstreamClient } from './upstream.ts'
 export type { ComateCheckOutcome, ComateCheckReason } from './bridge.ts'
 
 /**
+ * The redaction helper now lives in the zero-dependency `./redact.ts`; re-exported
+ * here because `bin.ts` and the tests have always imported it from this module.
+ */
+export { safeMessage } from './redact.ts'
+
+/**
  * Output budget of the probe request. Small on purpose: the point is to learn
  * whether the credential is accepted, not to generate anything.
  */
 export const COMATE_CHECK_MAX_TOKENS = 8
-
-/** Message cap for a redacted excerpt that crosses a boundary. */
-const MESSAGE_LIMIT = 500
-
-/**
- * Remove token-like strings from an unexpected message and cap its length.
- *
- * Applied to upstream excerpts too: an error body is third-party text and has
- * no business carrying a bearer, a cookie, or a JWT into a log line or a
- * browser response.
- *
- * @param error - any thrown value or upstream excerpt.
- * @returns a single-line, redacted, length-capped message.
- */
-export function safeMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
-    .replace(/(\b(?:code|token|refresh_token|access_token|apiKey|api_key)=)[^&\s]+/giu, '$1[redacted]')
-    .replace(/wps_sid=[^;"'\s]+/giu, 'wps_sid=[redacted]')
-    .slice(0, MESSAGE_LIMIT)
-}
 
 /**
  * The probe request body.

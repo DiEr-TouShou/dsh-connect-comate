@@ -36,7 +36,7 @@ import {
   type ComateSidStorage,
 } from './bridge.ts'
 import type { ComateCheckOutcome } from './check.ts'
-import { safeMessage } from './check.ts'
+import { safeMessage } from './redact.ts'
 import { hostIsLoopback, isJsonContentType, originIsLoopback } from './shim.ts'
 
 /**

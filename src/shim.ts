@@ -10,6 +10,9 @@
  *     随机端口绑定、body 上限、上游错误分类到 HTTP 状态码的映射，
  *     均由该项目（转引自 corrinehu/dsh-workbuddy-connect，MIT）设计并验证。
  * 改动：安全相关代码不做「改善」，原样沿用，仅替换上游类型与命名。
+ * v0.4.2：**出口**（`writeOpenAIError`）统一过 `safeMessage` 脱敏。之前只有低频的
+ *   `check.ts` 有这层，常驻的聊天数据路径反而没有；上游正文里回显一条 Cookie 或
+ *   Bearer 就会原样交给 pi-ai。
  *
  * @module dsh-connect-comate/shim
  */
@@ -21,6 +24,7 @@ import type { ComateCredentialStore } from './auth.ts'
 import type { ComateAssetUploader } from './assets.ts'
 import type { ComateCatalog } from './catalog.ts'
 import { emptyImageStats, emptyUploadStats, uploadChatImages } from './multimodal.ts'
+import { safeMessage } from './redact.ts'
 import { prepareChatBody, ComateUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
@@ -128,8 +132,17 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload)
 }
 
+/**
+ * Write one OpenAI-shaped error, redacting the message on the way out.
+ *
+ * 这里是**唯一**的错误出口：调用方给的是上游原文（`result.message`）、是
+ * `String(error)`、还是我们自己写死的常量，都在这一处过筛。放在出口而不是每个
+ * 调用点，是因为「记得脱敏」是件靠不住的事——上游正文里回显一条 `Cookie` 或一个
+ * Bearer，就够把真凭据交给 pi-ai 与浏览器面板；漏掉一个分支的代价，比在这里多跑
+ * 一次正则大得多。写死的常量过一遍无害（规则对 `[redacted]` 幂等）。
+ */
 function writeOpenAIError(res: ServerResponse, status: number, kind: string, message: string): void {
-  writeJson(res, status, { error: { message, type: kind, code: kind } })
+  writeJson(res, status, { error: { message: safeMessage(message), type: kind, code: kind } })
 }
 
 /** Read a request body with a size cap; over-limit bodies fail the request. */
@@ -269,7 +282,8 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
       prepared = await uploadChatImages(prepared, uploader, credential, uploadStats)
     } catch (error: unknown) {
       // 外置只是优化路径，任何意外都不该让请求失败：退回 base64 继续发。
-      logger?.warn('dsh-connect-comate: image externalization failed, sending inline images', error)
+      // 消息过脱敏：上传链的异常文本可能夹着上游回显的 `Cookie`。
+      logger?.warn('dsh-connect-comate: image externalization failed, sending inline images', safeMessage(error))
     }
     // 只在真的改动了图片时才发声：网关对裸字符串/假 base64/svg 会返回 200 + 空
     // 正文，日志是事后唯一能看出「那次空回答是怎么回事」的地方。
@@ -292,7 +306,10 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
         res,
         KIND_STATUS[result.kind],
         result.kind,
-        `comate upstream ${result.kind} (http ${result.status}): ${result.message.slice(0, 400)}`,
+        // 不再在这里 `slice`：截断要发生在脱敏**之后**（`safeMessage` 自己做），
+        // 先截再抹的话，一个跨在截断点上的令牌会被切掉一半而认不出来——半个真
+        // 凭据也是凭据。
+        `comate upstream ${result.kind} (http ${result.status}): ${result.message}`,
       )
       return
     }
@@ -309,7 +326,7 @@ export function createComateShim(options: ComateShimOptions): ComateShim {
       if (chunk.includes('[DONE]')) sawDone = true
     })
     body.on('error', (error: unknown) => {
-      logger?.warn('dsh-connect-comate: upstream stream failed mid-flight', error)
+      logger?.warn('dsh-connect-comate: upstream stream failed mid-flight', safeMessage(error))
       if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
     })
     body.pipe(res)
