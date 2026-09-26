@@ -186,6 +186,15 @@ pnpm run verify:redaction
 # 这是反向对照用的入口（打旧产物应当变红：0.4.2-rc.2 → 1/7）
 pnpm run verify:probe
 
+# 媒体生成链路（另一组端点：images/generations、videos、videos/{id}/content，不走 shim）：
+# 真凭据直连网关，跑通「生图 / 生视频 → 取回字节 → 上传云存储」的完整路径。断言刻意钉住
+# 四件「读源码会读错」的事实：端点根本不发 code（别断言 code === 0）、content-type 会撒谎
+# （按字节嗅探格式，生图实为 JPEG）、生图返回 url 而非 b64_json、上游已写好 GB 45438-2025
+# AIGC 元数据（缺失只提示不判红——上游一旦不写，是插件要跟进）。上传用插件自己的
+# ComatePresignUploader，验产物而非复述协议。默认 import lib/ 产物，COMATE_PKG_DIR 可换。
+# 默认只跑生图（约 10s）；生视频约 2 分钟且真扣额度，默认关，要跑加 COMATE_MEDIA_VIDEO=1
+pnpm run verify:media
+
 # 卡片状态机：在 jsdom 里跑**真实构建产物** lib/client.js，按用户的操作序列断言 DOM：
 # 模型勾选状态（打开 / 取消勾选 / 保存 / 退出 / 再进入）、每模型输出上限、模型别名、
 # 思考档位勾选框。钉住的是「设置快照与模型目录两个异步源谁先到，草稿该怎么重新播种」——

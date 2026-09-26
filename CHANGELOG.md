@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.1-rc.1 (2026-09-26)
+
+> 一条**开发期工具**的固化，**插件运行时行为一字未变**。上一轮为了探清「WPS Comate 怎么
+> 生图 / 生视频」，脚本散在系统临时目录里；这次把它们收成可回归的 `pnpm run verify:media`，
+> 为接下来的媒体能力集成（`comateMedia` 服务）留一份真机基线。**代码改动只有两处**：新增
+> `scripts/verify-media.mjs`，`package.json` 加一条 script（其余是 README 一段用法说明与
+> 本节 CHANGELOG）。`src/`、`lib/`、`cordis.patch.yml` 全未触及，`files` 白名单也不含
+> `scripts/`，所以发布包里没有它，安装产物的行为与 `0.5.0` 完全一致。
+> 已打 tag `v0.5.1-rc.1` 并推 origin；
+> 安装：`github:DiEr-TouShou/dsh-connect-comate#v0.5.1-rc.1`。未上 npm。
+
+### Features
+
+- **`verify:media`：媒体生成链路的真机基线**（`scripts/verify-media.mjs`）。媒体是
+  **另一组端点**（`images/generations`、`videos`、`videos/{id}/content`），不经过 shim，
+  所以 `verify:shim` 覆盖不到它——`verify:shim` 验的是对话链路（chat/completions +
+  图片外置），媒体端点有自己的响应形状和自己的坑。
+  断言刻意钉住四件**读源码会读错**的事实（2026-09-26 实测）：
+  - 端点**根本不发 `code`**（生图是 OpenAI 形状 `{created,data,usage}`，生视频是
+    `{id,object,model,status,…}`）——源码里的 `isBizSuccessCode` 之所以不误报，是因为它
+    实现为「`code === undefined` 即成功」，所以这里**不断言** `code === 0`；
+  - **`content-type` 会撒谎**：生图响应头是 `application/octet-stream`，字节其实是
+    JPEG —— 断言**按字节嗅探出的**格式，不看响应头；
+  - 生图返回 **`url`**（ks3 上的 aigc-metadata 路径）而不是 `b64_json`，因此
+    「下载 → 嗅探 → 上传」是必需路径；脚本两种载荷都接；
+  - 上游**已经写好 GB 45438-2025 AIGC 元数据**（JPEG APP1 XMP 的 `TC260:AIGC`，
+    `ProduceID` 前缀 `T`）—— 意味着走 llmproxy 通道时插件**不需要**再实现
+    `watermark.js` / `aigc-metadata.js`。这一条缺失时**只提示、不判红**：上游一旦不写，
+    是插件需要跟进，不是脚本该红。
+  上传复用**插件自己的** `ComatePresignUploader`（而不是手写三步），并回抓一次下载 URL
+  确认可用——验的是**产物**，不是复述协议。凭据走 `readWpsSid()`
+  （`scripts/live-profile.mjs`，环境推导、无用户名硬编码）；默认 import `lib/` 产物，
+  `COMATE_PKG_DIR` 可换目录，与 `verify:shim` 一致（源码绿 ≠ 产物绿）。
+  生视频**默认关**（约 2 分钟且真扣额度），要跑加 `COMATE_MEDIA_VIDEO=1`；另有
+  `COMATE_MEDIA_PROMPT` / `COMATE_MEDIA_VIDEO_PROMPT` / `COMATE_MEDIA_VIDEO_TIMEOUT_MS`
+  / `COMATE_MEDIA_OUT` / `WPS_COMATE_SID`。
+
+### 验收
+
+- 真机实跑 `COMATE_MEDIA_VIDEO=1 pnpm run verify:media`：**PASS 2/2**。
+  - 生图 **7.7s**：自动选模，960×960，载荷经 `url`，嗅探为 `image/jpeg`（响应头声称
+    octet-stream），约 674 KB，AIGC `ProduceID` 前缀 `T`；上传云存储 + 换回可下载 URL
+    均通过；`usage={"prompt_tokens":0,"completion_tokens":14400,"total_tokens":14400}`。
+  - 生视频 **121.9s**：自动路由到 `doubao-seedance-2-0-fast-260128`，
+    `queued → in_progress → completed`；taskId 含 `/`，按段 `encodeURIComponent` 已验；
+    content URL 为 `http` 开头且带 `\u0026` 转义（需还原成 `&`）；下载得 1.15 MB MP4。
+- 脚本如实报**产物**版本，顺带暴露了一个既有事实：工作副本 `lib/` 的构建时间早于
+  `package.json` 版本号改动时，两者会不一致（本次就报了 `0.4.3-rc.2`）。验某个具体版本
+  的行为前，记得先 `pnpm run build`。
+
 ## 0.5.0 (2026-09-26)
 
 > 一条「任务完成后不写标题」的修复：DSH 的标题请求固定 `max_tokens=64`，Comate 网关对
