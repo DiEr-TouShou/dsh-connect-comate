@@ -10,14 +10,16 @@
  *      （`verify-shim-live.mjs`）需要 sid，而脱敏是安全边界，不该只在有账号的机器上
  *      才被检查。
  *
- * 三个用例对应 shim 的三条真实出口：上游拒绝、凭据解析失败、handler 内部异常。
- * 判定是「合成凭据一个字符都不剩」，同时「分类与原因仍在」——脱敏不是把错误信息抹平。
+ * 四个用例：前三个对应 shim 的三条真实出口（上游拒绝、凭据解析失败、handler 内部异常），
+ * 第四个钉住一个容易被「顺手抹掉」的诊断：网关真实返回的 `"code":"not_login"`
+ * （本机实测形状）必须活着出来——脱敏不是把错误信息抹平。
+ * 判定是「合成凭据一个字符都不剩」**且**「分类与原因仍在」。
  *
  * 跑法：
  *   node scripts/verify-redaction.mjs
  *   COMATE_PKG_DIR="<插件安装目录>" node scripts/verify-redaction.mjs
  *
- * 退出码 0 = 3/3 通过。
+ * 退出码 0 = 4/4 通过。
  */
 import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -74,9 +76,11 @@ async function boot({ chatStream, resolveThrows, catalogThrows }) {
 }
 
 let failures = 0
+let total = 0
 
 /** 一条用例：跑一次请求，检查出口字节。 */
 async function check(name, { shim, request, mustKeep }) {
+  total++
   let raw
   try {
     raw = await request(shim)
@@ -124,6 +128,22 @@ await check('upstream error body', {
   mustKeep: ['session_dead', 'Offline user session not found', '12153'],
 })
 
+// 网关真实的未登录响应（本机实测）：`code` 是符号标识而不是数字。这类值一旦被抹成
+// `[redacted]`，用户就失去了那个可以去搜、本插件自己也用来分类的标记。
+await check('upstream error with a symbolic code', {
+  shim: await boot({
+    chatStream: async () => ({
+      ok: false,
+      status: 401,
+      kind: 'session_dead',
+      message: '{"error":{"message":"未登录，请先登录","type":"authentication_error",'
+        + `"code":"not_login"},"echo":"wps_sid=${SID}"}`,
+    }),
+  }),
+  request: chat,
+  mustKeep: ['session_dead', 'not_login', '未登录，请先登录'],
+})
+
 await check('credential resolution failure', {
   shim: await boot({ resolveThrows: new Error(`comate: cannot read C:/fake/config.json (cookie: wps_sid=${SID})`) }),
   request: chat,
@@ -138,5 +158,5 @@ await check('handler exception (internal 500)', {
   mustKeep: ['internal', 'model directory unreadable'],
 })
 
-console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}  3-${failures}/3`)
+console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}  ${total - failures}/${total}`)
 process.exit(failures === 0 ? 0 : 1)

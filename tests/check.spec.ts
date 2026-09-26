@@ -105,7 +105,8 @@ describe('safeMessage', () => {
   })
 
   it('redacts credential-ish query parameters', () => {
-    const out = safeMessage('failed?code=SEKRET&token=SEKRET2&apiKey=SEKRET3')
+    // 刻意不用 `code`：它现在是唯一带例外的键（错误标识要留着），见 redact.spec.ts。
+    const out = safeMessage('failed?token=SEKRET&apiKey=SEKRET2&access_token=SEKRET3')
     expect(out).not.toContain('SEKRET')
     expect(out).not.toContain('SEKRET2')
     expect(out).not.toContain('SEKRET3')

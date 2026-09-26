@@ -53,9 +53,10 @@ describe('redactSecrets', () => {
   })
 
   it('redacts query-string and form-encoded credentials', () => {
-    const out = redactSecrets(`failed?code=${TOKEN}&token=${TOKEN}&apiKey=${KEY}&wps_sid=${SID}`)
+    // 刻意不用 `code`：它现在是唯一带例外的键，见本文件后面的两个用例。
+    const out = redactSecrets(`failed?token=${TOKEN}&apiKey=${KEY}&wps_sid=${SID}&session_id=${TOKEN}`)
     expectNoSecrets(out)
-    expect(out).toContain('code=')
+    expect(out).toContain('token=[redacted]')
   })
 
   it('redacts every pair of a cookie header', () => {
@@ -88,19 +89,32 @@ describe('redactSecrets', () => {
     }
   })
 
-  it('keeps a numeric error code visible', () => {
-    // `code` 是唯一带例外的键：网关把会话失效写成 `code=12153`，那个数字是用户
-    // 要去搜的、也是本插件自己分类用的标记。抹掉它等于让错误信息更难用。
+  it('keeps an error code visible, in both real shapes', () => {
+    // `code` 是唯一带例外的键，因为网关的 `code` 是错误标识而不是凭据：数字形态
+    // （会话失效 `12153`）与符号形态（`not_login`，本机真实返回）。两者都是用户要
+    // 去搜的、也是本插件自己分类用的标记。抹掉它等于让错误信息更难用。
     expect(redactSecrets('{"code":"12153","message":"Offline user session not found"}'))
       .toContain('12153')
     expect(redactSecrets('code=12153')).toBe('code=12153')
+    expect(redactSecrets('{"error":{"message":"未登录，请先登录","type":"authentication_error","code":"not_login"}}'))
+      .toContain('"code":"not_login"')
   })
 
-  it('still redacts a non-numeric value under `code`', () => {
-    // 例外只放行「纯数字且 ≤ 6 位」；`code` 下其他形状照样当秘密处理。
-    expect(redactSecrets(`code=${TOKEN}`)).not.toContain(TOKEN)
+  it('still redacts a credential-shaped value under `code`', () => {
+    // 例外只放行**标识符形状**。`-` `.` `+` `/` `=` 全不在允许集里，所以 base64、
+    // UUID、JWT、`sk-live-…` 都过不去——`code` 不能成为藏凭据的后门。
     expect(redactSecrets(`code=${KEY}`)).not.toContain(KEY)
+    expect(redactSecrets(`code=${JWT}`)).not.toContain(JWT)
     expect(redactSecrets('code=1234567890')).not.toContain('1234567890')
+    expect(redactSecrets('code=QWxsaSB5b3VyIGJhc2U2NA==')).not.toContain('QWxsaSB5b3VyIGJhc2U2NA')
+    expect(redactSecrets('code=a1b2c3d4-e5f6-7890-abcd-ef1234567890')).not.toContain('a1b2c3d4')
+  })
+
+  it('documents the known gap: an identifier-shaped bare token under `code` survives', () => {
+    // 这是自觉的残留缺口（见 redact.ts 模块头）：`SYNTHTOKEN…` 既是「裸令牌」也是
+    // 「标识符形状」，而 `code` 下只能二选一。选「保留错误码」——它被抹掉是每次
+    // 会话失效都会发生的伤害，而 `code` 里出现裸令牌是不现实的形状。
+    expect(redactSecrets(`code=${TOKEN}`)).toContain(TOKEN)
   })
 
   it('is idempotent: a second pass changes nothing', () => {

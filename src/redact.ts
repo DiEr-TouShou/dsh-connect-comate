@@ -29,8 +29,8 @@
  * 覆盖不到的：**没有键名、也没有已知前缀的裸凭据**（比如上游在散文里直接写
  * `invalid sid 8f7e6d5c4b3a`）。识别它需要猜测「哪个长字符串是秘密」，那必然要么
  * 误伤正常数字、要么仍然漏。这一条限制是自觉的，写在注释里而不是假装不存在。
- * 它也是两处刻意例外的原因：`code=<纯数字>`（错误码要留着给人搜）与短的裸
- * `key: value`（那是英文句子，不是 YAML）。
+ * 它也是两处刻意例外的原因：`code=<错误码>`（纯数字或 `not_login` 这类标识，要留着给人搜）
+ * 与短的裸 `key: value`（那是英文句子，不是 YAML）。
  *
  * @module dsh-connect-comate/redact
  */
@@ -61,16 +61,20 @@ const SECRET_KEYS = 'wps_sid|sid|session[_-]?id|session|token|access[_-]?token|r
   + '|authorization|auth|code'
 
 /**
- * A short run of digits is a status code, not a secret.
+ * `code` 是唯一带例外的键，因为这个插件这条链路上的 `code` 几乎总是**错误码**，
+ * 而且实测有两种形状：纯数字（网关把会话失效写成 `"code":"12153"`）与符号标识
+ * （`"code":"not_login"`，本机真实返回）。两者都是用户要去搜的、也是本插件
+ * `classifyUpstreamError` 自己认的标记——抹成 `[redacted]` 等于让错误信息比上游原文
+ * 更难用，换来的安全性接近零。
  *
- * `code` 是唯一带例外的键，因为这个插件这条链路上的 `code` 几乎总是**错误码**：
- * 网关把会话失效写成 `code=12153`，而那个数字正是用户要去搜的、也是本插件
- * `classifyUpstreamError` 自己认的那个标记。把它抹成 `[redacted]` 等于让错误信息
- * 比上游原文更难用，而换来的安全性接近零（Comate 网关不走 OAuth 授权码）。
- * 所以只放行「纯数字且不超过 6 位」这一种值，其余照旧一律抹掉——`code=SEKRET`
- * 这类非数字值仍然是秘密。
+ * 只放行**标识符形状**：纯数字 ≤ 6 位，或字母开头、字母数字/下划线、≤ 32 字符。
+ * 凭据形状的值照样过不去：`-` `.` `+` `/` `=` 全不在允许集里（base64、UUID、
+ * `sk-live-…` 都不合规），JWT 与已知前缀更是被更早的规则先一步抹掉。
+ *
+ * 残留缺口（自觉的）：一个纯字母数字、≤ 32 字符的裸令牌恰好出现在 `code` 下会漏。
+ * 这与模块开头声明的「无键名、无已知前缀的裸凭据识别不了」是同一类限制。
  */
-const STATUS_CODE_SHAPE = /^\d{1,6}$/u
+const ERROR_CODE_SHAPE = /^(?:\d{1,6}|[A-Za-z][A-Za-z0-9_]{0,31})$/u
 
 /**
  * Minimum value length for the **bare** `key: value` spelling (no quotes, no `=`).
@@ -140,7 +144,7 @@ export function redactSecrets(text: string): string {
       // 裸冒号（既没有引号也没有 `=`）只在值像凭据时才动，见 BARE_COLON_MIN_VALUE。
       const bareColon = !separator.includes('=') && !separator.includes('"')
       if (bareColon && value.length < BARE_COLON_MIN_VALUE) return match
-      if (key.toLowerCase() === 'code' && STATUS_CODE_SHAPE.test(value)) return match
+      if (key.toLowerCase() === 'code' && ERROR_CODE_SHAPE.test(value)) return match
       return `${lead}${key}${separator}${REDACTED}`
     },
   )
