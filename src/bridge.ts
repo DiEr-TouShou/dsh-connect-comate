@@ -164,6 +164,79 @@ export interface ComatePersistedModel {
 export const COMATE_DEFAULT_MAX_TOKENS = 32_000
 
 /**
+ * Thinking levels this route offers WITHOUT asking, in pi-ai's own escalation
+ * order: the four the model picker has always listed.
+ *
+ * Declared here, not in `./thinking-levels.ts`, because **both halves** name
+ * them: the host builds `thinkingLevelMap` from them, and the card interpolates
+ * the list into the copy that explains what the extra levels add on top.
+ */
+export const COMATE_BASE_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high'] as const
+
+/**
+ * Thinking levels that are offered only when the user turns them on, in the
+ * order the card shows them.
+ *
+ * They are off by default because each one is a claim this plugin cannot make
+ * on its own: `off` changes what an UNNAMED effort means (see
+ * {@link COMATE_THINKING_LEVEL_WIRE}), and `xhigh` / `max` are accepted by the
+ * gateway but were measured to behave no differently from `high`.
+ *
+ * The order below is the CARD's, not the model picker's: the picker lists what
+ * pi-ai's own `EXTENDED_THINKING_LEVELS` says, which puts `off` first.
+ */
+export const COMATE_EXTRA_THINKING_LEVELS = ['off', 'xhigh', 'max'] as const
+
+/** One manually enabled thinking level. */
+export type ComateExtraThinkingLevel = (typeof COMATE_EXTRA_THINKING_LEVELS)[number]
+
+/**
+ * The `reasoning_effort` value each manually enabled level sends.
+ *
+ * Measured on the live gateway (2026-09-26, this machine, the 10-model catalog),
+ * not guessed. Every number below is `reasoning_content` characters on one
+ * arithmetic prompt, so the two ends are comparable:
+ *
+ * - `'off'` really does stop thinking — it drops to **0 chars** from a
+ *   non-zero baseline on deepseek-v4-flash (656→0), -pro (398→0),
+ *   -v4.1-flash (313→0), MiniMax-M3 (104→0), mimo-v2.5 (1609→0),
+ *   mimo-v2.5-pro (132→0) and glm-5.2 (1242→0). Two models ignore it and think
+ *   *more*: glm-5.3-flash (660→1357) and glm-5.3 (810→3059). kimi-k3 cannot be
+ *   counted either way — its baseline is already 0 on this prompt.
+ *   (An earlier measurement in this file claimed all three zhipu models ignored
+ *   `off`; re-measuring on 2026-09-26 showed glm-5.2 obeying it, so the caveat
+ *   is scoped to the two glm-5.3 models.)
+ * - `'none'` — the value the OpenAI `reasoning_effort` vocabulary uses for
+ *   "off" — is ACCEPTED (HTTP 200) and **ignored**: `reasoning_content` stays
+ *   at its baseline length on all ten models (201–1665 chars, none at 0). So
+ *   `none` is NOT the off switch here, and spelling the level with it would be
+ *   a lie the picker told.
+ * - `'xhigh'` / `'max'` are accepted (HTTP 200) and still reason, but two
+ *   samples per level could not tell them apart from `high`. The spread WITHIN
+ *   one level dwarfs any between-level difference: deepseek-v4-flash `high`
+ *   came back 412 and 365 while `xhigh` gave 332/377 and `max` 230/335; on
+ *   -pro, `high` gave 536/722 against `xhigh` 628/402 and `max` 522/392. They
+ *   are therefore offered as aliases the user opts into, never as a measured
+ *   escalation.
+ * - `reasoning_effort: false` is a 400 (`invalid request body`), so a level must
+ *   carry a string.
+ *
+ * ## Why offering `off` also changes what "no effort" means
+ *
+ * pi-ai consults `thinkingLevelMap.off` in exactly one place when nothing names
+ * an effort (`openai-completions.js`: `else if (!options?.reasoningEffort &&
+ * model.reasoning && compat.supportsReasoningEffort)`), and that same entry is
+ * what makes the level appear in the picker at all. There is no way to offer
+ * `off` without also making the picker's "provider default" send it — so the
+ * card says so out loud instead of hiding it.
+ */
+export const COMATE_THINKING_LEVEL_WIRE: Readonly<Record<ComateExtraThinkingLevel, string>> = {
+  off: 'off',
+  xhigh: 'xhigh',
+  max: 'max',
+}
+
+/**
  * The settings section the card edits, as the browser mirror delivers it.
  * Every field except `configFile` is declared volatile on the host schema, so on
  * 0.1.7 each one may arrive wrapped in a live reference — read it through
@@ -187,6 +260,25 @@ export interface ComateSettingsValue {
    * dropping the key rather than by writing the global value back into it.
    */
   maxOutputTokensByModel?: Record<string, number>
+  /**
+   * Display-name overrides, keyed by model id.
+   *
+   * Purely cosmetic: the alias replaces the name DSH shows in its model picker
+   * and nowhere else. The model's id — what a request and the settings document
+   * address it by — never changes, so renaming a model can never break a saved
+   * `maxOutputTokensByModel` entry or a `default-model` choice.
+   */
+  modelAliases?: Record<string, string>
+  /**
+   * Manually enabled extra thinking levels, a subset of
+   * {@link COMATE_EXTRA_THINKING_LEVELS}.
+   *
+   * Absent/empty is the default and offers exactly
+   * {@link COMATE_BASE_THINKING_LEVELS}; a non-empty list adds those levels to
+   * the picker. Only the levels listed are added — the field is not a
+   * replacement for the base four.
+   */
+  extraThinkingLevels?: string[]
 }
 
 /**

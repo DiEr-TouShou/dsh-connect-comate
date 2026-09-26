@@ -31,10 +31,13 @@ import { COMATE_DEFAULT_MAX_TOKENS, ComateCredentialStore } from './auth.ts'
 import { ComateCatalog, selectComateModels } from './catalog.ts'
 import { runComateCheck, type ComateCheckOutcome } from './check.ts'
 import { COMATE_MAX_TOKENS_ENV, parseMaxTokensByModel, resolveComateMaxTokens, resolveMaxOutputTokens, unusableModelTokens } from './max-tokens.ts'
+import { modelAliasOf, parseModelAliases, unusableModelAliases } from './model-alias.ts'
+import { parseExtraThinkingLevels, unusableThinkingLevels, type ComateExtraThinkingLevel } from './thinking-levels.ts'
 import { createComateShim } from './shim.ts'
 import { ComateUpstreamClient } from './upstream.ts'
 import {
   asVolatile,
+  COMATE_EXTRA_THINKING_LEVELS,
   type ComatePersistedModel,
 } from './bridge.ts'
 import { bindComateSettings } from './settings-surface.ts'
@@ -45,20 +48,24 @@ export { createComateShim, type ComateShim } from './shim.ts'
 export { ComateCatalog, selectComateModels } from './catalog.ts'
 export {
   asVolatile,
+  COMATE_BASE_THINKING_LEVELS,
   COMATE_CATALOG_PATH,
   COMATE_CHECK_PATH,
   COMATE_CLIENT_NAME,
   COMATE_ENTRY_ID,
+  COMATE_EXTRA_THINKING_LEVELS,
   COMATE_REFRESH_PATH,
   COMATE_SEALED_PREFIX,
   COMATE_SEAL_PATH,
   COMATE_SETTINGS_NS,
+  COMATE_THINKING_LEVEL_WIRE,
   isSealedComateSecret,
   unwrapVolatile,
   unwrapVolatileDeep,
   type ComateCatalogAnswer,
   type ComateCheckOutcome,
   type ComateCheckReason,
+  type ComateExtraThinkingLevel,
   type ComatePersistedModel,
   type ComateSealAnswer,
   type ComateSettingsValue,
@@ -214,6 +221,31 @@ export interface Config {
    * what keeps the settings document readable.
    */
   maxOutputTokensByModel?: Record<string, number>
+  /**
+   * Display-name overrides, keyed by model id.
+   *
+   * Cosmetic by construction: the alias replaces the descriptor's `name` — what
+   * DSH's model picker paints — while the id stays untouched. So a rename can
+   * never invalidate a saved {@link Config.maxOutputTokensByModel} entry or an
+   * `agent-default-model` choice, and clearing a box (or writing an empty value)
+   * means "no alias", not "an empty name".
+   */
+  modelAliases?: Record<string, string>
+  /**
+   * Extra thinking levels to offer in the model picker, on top of
+   * `minimal` / `low` / `medium` / `high`.
+   *
+   * A subset of `off` / `xhigh` / `max`, written by the card's checkboxes and
+   * empty by default. Only the levels listed are ADDED — this field never
+   * removes a base level.
+   *
+   * `off` is the one entry with a side effect beyond adding a row to the picker:
+   * pi-ai reads `thinkingLevelMap.off` whenever nothing names an effort, so
+   * enabling it also makes the picker's "provider default" mean "thinking off".
+   * The card says so next to the box; the measured wire values are in
+   * `bridge.ts`.
+   */
+  extraThinkingLevels?: string[]
 }
 
 const persistedModelConfig = z.object({
@@ -242,6 +274,12 @@ export const Config: z<Config> = z.object({
   )),
   maxOutputTokensByModel: asVolatile(z.dict(z.number().step(1).min(0)).default({}).description(
     '按模型 id 覆盖输出 token 上限：正整数为上限，0 表示该模型不设上限；未列出的模型跟随 maxOutputTokens',
+  )),
+  modelAliases: asVolatile(z.dict(z.string()).default({}).description(
+    '按模型 id 设置显示名别名：只改 DSH 模型选择器里显示的名字，不改 id（请求、输出上限表、default-model 用的都是 id）；值留空即撤销该别名',
+  )),
+  extraThinkingLevels: asVolatile(z.array(z.string()).default([]).description(
+    '额外开放的思考档位（off / xhigh / max 的子集，默认不开放；基础档位 minimal/low/medium/high 始终提供）。off 实测能真正关掉思考，但打开它也会让「provider default」变成不思考；xhigh/max 实测被上游接受、效果与 high 无差别',
   )),
 })
 
@@ -337,6 +375,58 @@ export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
 
   /**
+   * Live read of one model's display-name alias (`undefined` = discovered name).
+   *
+   * Read per call, like the output cap, so a saved rename reaches the picker on
+   * the next catalog read instead of the next restart. The parsing rules are
+   * shared with the card (`model-alias.ts`), so the map the card writes and the
+   * map this reads can never disagree about what a blank value means.
+   */
+  const modelAlias = (modelId: string): string | undefined =>
+    modelAliasOf(parseModelAliases(current().modelAliases), modelId)
+
+  /**
+   * Live read of the manually enabled extra thinking levels.
+   *
+   * Empty means "offer exactly the base four" — the 0.4.1-rc.2 picker — and
+   * an unreadable entry is dropped rather than taking the whole list down with
+   * it, so a typo in one level cannot hide the other two.
+   */
+  const extraThinkingLevels = (): ComateExtraThinkingLevel[] =>
+    parseExtraThinkingLevels(current().extraThinkingLevels)
+
+  /**
+   * Say out loud which alias / thinking-level entries could not be read.
+   *
+   * Same reasoning as the output-cap pass below: a dropped entry is invisible in
+   * the card (the box renders empty, the level renders unchecked, which looks
+   * exactly like "never set"), so the log is the only place that can name it.
+   * The note is the refused entries THEMSELVES rather than their count: two
+   * different typos both have length 1, and the second one still deserves a
+   * line.
+   */
+  let lastTuningNote = ''
+  const reportModelTuning = (settings: Config): void => {
+    const refusedAliases = unusableModelAliases(settings.modelAliases)
+    const refusedLevels = unusableThinkingLevels(settings.extraThinkingLevels)
+    const note = JSON.stringify([refusedAliases, refusedLevels])
+    if (note === lastTuningNote) return
+    lastTuningNote = note
+    for (const entry of refusedAliases) {
+      ctx.logger.warn(
+        `dsh-connect-comate: ignoring the unusable alias for model "${entry.modelId}"`
+        + ` (${JSON.stringify(entry.raw)}); that model keeps the name Comate reported`,
+      )
+    }
+    for (const entry of refusedLevels) {
+      ctx.logger.warn(
+        `dsh-connect-comate: ignoring the unusable thinking level ${JSON.stringify(entry)};`
+        + ` extraThinkingLevels accepts only ${COMATE_EXTRA_THINKING_LEVELS.join(', ')}`,
+      )
+    }
+  }
+
+  /**
    * Say out loud how the stored `wps_sid` is protected, once per change.
    *
    * Two states deserve a line. A value written by an older version is still
@@ -391,6 +481,7 @@ export function apply(ctx: Context, config: Config): void {
     store.setWpsSid(next.wpsSid)
     store.setCookieOnly(next.cookieOnly === true)
     reportOutputCap(next)
+    reportModelTuning(next)
     // Fire-and-forget: it only logs, and a settings change must not wait on file
     // I/O (the key file may live on a slow or missing path).
     void reportSidStorage()
@@ -513,6 +604,11 @@ export function apply(ctx: Context, config: Config): void {
           // required when it changes: the profile's `configuredMaxTokens` — what
           // the harness turns into the request's `max_tokens` — is rebuilt there.
           maxOutputTokens: outputCap,
+          // Renaming and the level list both land in the model descriptors, so
+          // they ride the same live-read + `invalidate()` path as the cap: the
+          // catalog republish that follows a save is what pushes them out.
+          modelAlias,
+          extraThinkingLevels,
           // The durable attachment service is a HOST service: it owns the
           // stored bytes of every image the user attached, and pi-ai's context
           // builder reads them through it and nowhere else. An image whose

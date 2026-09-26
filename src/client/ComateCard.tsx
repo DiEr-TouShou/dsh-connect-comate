@@ -1,8 +1,8 @@
 /**
  * Comate connection card contributed to DSH's plugin configuration:
  * a wps_sid input, a cookie-only toggle, a default output-token cap, a
- * model-selection list with a per-model cap box on every row, and save/discard
- * actions.
+ * model-selection list with a per-model cap box and name alias on every row,
+ * the advanced thinking-level switches, and save/discard actions.
  *
  * 卡片外壳形态参考 dingminhua/dsh-connect-workbuddy（MIT）。
  *
@@ -14,19 +14,31 @@
  *   settings（0.1.7 的 settings 写入目标就是用户手写的 `cordis.patch.yml`）。
  *   路由不可用时卡片降级为「暂无目录」，模型服务不受影响。
  *
+ * ## 两个「高级」区
+ *
+ * 别名（每行一个输入框）与思考档位（三个勾选框）都在这里，但都不属于「第一次
+ * 打开就该改」的东西，所以文案里把它们的代价写清楚，尤其是 `off` 会连带改掉
+ * 「不指定档位」的含义（见 `bridge.ts` 的 `COMATE_THINKING_LEVEL_WIRE`）。
+ *
  * @module dsh-connect-comate/client/ComateCard
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  COMATE_BASE_THINKING_LEVELS,
   COMATE_CATALOG_PATH,
   COMATE_DEFAULT_MAX_TOKENS,
+  COMATE_EXTRA_THINKING_LEVELS,
+  COMATE_THINKING_LEVEL_WIRE,
   isSealedComateSecret,
   type ComateCheckOutcome,
+  type ComateExtraThinkingLevel,
   type ComatePersistedModel,
   type ComateSidStorage,
 } from '../bridge.ts'
 import { parseMaxOutputTokens } from '../max-tokens.ts'
+import { aliasKey, parseModelAliases, type ComateModelAliases } from '../model-alias.ts'
+import { parseExtraThinkingLevels } from '../thinking-levels.ts'
 import { COMATE_PLUGIN_ICON } from './icon.ts'
 import { COMATE_CARD_CSS } from './styles.ts'
 import type { ComateSettingsKey } from './locales.ts'
@@ -198,6 +210,34 @@ function textCapDrafts(caps: Readonly<Record<string, number>>): Record<string, s
   return drafts
 }
 
+/**
+ * Seed the alias boxes from the stored map.
+ *
+ * The alias boxes hold plain text, so unlike the cap boxes there is nothing to
+ * normalize here: an absent key is an empty box, which is also what "no alias"
+ * means. Parsing (and therefore what a blank box means on save) stays in
+ * `model-alias.ts`, shared with the host.
+ */
+function textAliasDrafts(aliases: ComateModelAliases): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const [id, name] of aliases) drafts[id] = name
+  return drafts
+}
+
+/**
+ * Which locale key labels each manually enableable thinking level.
+ *
+ * A map rather than a template string (`row.thinking.${level}`) because `t` is
+ * typed on the exact key union: a computed key would widen to `string` and lose
+ * the check that every level has copy — which is the check that matters when a
+ * fourth level is added to {@link COMATE_EXTRA_THINKING_LEVELS}.
+ */
+const THINKING_LEVEL_LABEL: Readonly<Record<ComateExtraThinkingLevel, ComateSettingsKey>> = {
+  off: 'row.thinkingOff',
+  xhigh: 'row.thinkingXhigh',
+  max: 'row.thinkingMax',
+}
+
 /** Render the Comate sign-in configuration as one card (or page body). */
 export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   if (t === undefined) throw new Error('Comate plugin card requires its translation function')
@@ -225,6 +265,17 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   // empty box on every row.
   const savedModelCaps = useMemo(() => saved.maxOutputTokensByModel ?? {}, [saved.maxOutputTokensByModel])
   const savedModelCapsKey = useMemo(() => capKey(savedModelCaps), [savedModelCaps])
+  // The stored aliases, already normalized by the SAME parser the host uses, so
+  // "has the user touched this?" cannot disagree with what a save would store.
+  const savedAliases = useMemo(() => parseModelAliases(saved.modelAliases), [saved.modelAliases])
+  const savedAliasesKey = useMemo(() => aliasKey(savedAliases), [savedAliases])
+  // The stored extra levels, normalized to the shared vocabulary: a hand-edited
+  // `extraThinkingLevels` may name the same level twice, or name one that does
+  // not exist, and neither should make the card look dirty on open.
+  const savedExtraLevels = useMemo(
+    () => new Set<string>(parseExtraThinkingLevels(saved.extraThinkingLevels)),
+    [saved.extraThinkingLevels],
+  )
   const [catalog, setCatalog] = useState<ComatePersistedModel[]>([])
   const [catalogFailed, setCatalogFailed] = useState(false)
   const catalogIds = useMemo(() => catalog.map(model => model.id), [catalog])
@@ -250,6 +301,13 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const [draftModelCaps, setDraftModelCaps] = useState<Record<string, string>>(
     () => textCapDrafts(savedModelCaps),
   )
+  // Alias boxes, keyed by model id: an empty box is "no alias" (the discovered
+  // name shows through), so clearing one is how an alias is undone.
+  const [draftAliases, setDraftAliases] = useState<Record<string, string>>(
+    () => textAliasDrafts(savedAliases),
+  )
+  // The manually enabled thinking levels, as a set of level ids.
+  const [draftExtraLevels, setDraftExtraLevels] = useState<Set<string>>(savedExtraLevels)
   const [saving, setSaving] = useState(false)
   const [savedFlash, setSavedFlash] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -445,6 +503,27 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
       ? textCapDrafts(savedModelCaps)
       : current))
   }, [savedModelCapsKey, savedModelCaps])
+  // Aliases and levels follow the same rule as the cap map: an untouched draft
+  // tracks a value changed from another surface (a second card, or a hand-edited
+  // cordis.patch.yml), a touched one is left alone. Both use the SHARED
+  // normalizers for the "has the user touched this?" test, so a draft that only
+  // differs by trimming or by level order still counts as untouched.
+  const prevSavedAliases = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const previous = prevSavedAliases.current
+    prevSavedAliases.current = savedAliasesKey
+    if (previous === undefined || previous === savedAliasesKey) return
+    setDraftAliases(current => (aliasKey(parseModelAliases(current)) === previous
+      ? textAliasDrafts(savedAliases)
+      : current))
+  }, [savedAliasesKey, savedAliases])
+  const prevSavedExtraLevels = useRef<ReadonlySet<string> | undefined>(undefined)
+  useEffect(() => {
+    const previous = prevSavedExtraLevels.current
+    prevSavedExtraLevels.current = savedExtraLevels
+    if (previous === undefined || sameIdSet(previous, savedExtraLevels)) return
+    setDraftExtraLevels(current => (sameIdSet(current, previous) ? new Set(savedExtraLevels) : current))
+  }, [savedExtraLevels])
   // The directory arrives asynchronously, so the saved set moves from the empty
   // set to "everything discovered" once the fetch lands — which re-seeds a draft
   // the user has not touched yet. `undefined` means "nothing observed yet": the
@@ -480,10 +559,18 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
   const capDrafts = parseCapDrafts(draftModelCaps)
   const modelCapsInvalid = capDrafts.invalid.length > 0
   const modelCapsDirty = capKey(capDrafts.caps) !== savedModelCapsKey
+  // The alias boxes, by the same rule as the cap boxes: what Save would write is
+  // the parsed map, and dirty compares fingerprints rather than raw text — typing
+  // a space after a name is not a change.
+  const aliasDrafts = parseModelAliases(draftAliases)
+  const aliasesDirty = aliasKey(aliasDrafts) !== savedAliasesKey
+  const extraLevelsDirty = !sameIdSet(draftExtraLevels, savedExtraLevels)
   const dirty = sidDirty
     || draftCookieOnly !== savedCookieOnly
     || maxTokensDirty
     || modelCapsDirty
+    || aliasesDirty
+    || extraLevelsDirty
     || !sameIdSet(draftEnabled, savedEnabledIds)
 
   /**
@@ -533,6 +620,21 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     })
   }
 
+  /**
+   * Flip one extra thinking level in the draft.
+   *
+   * A set, not a list: the levels have a fixed vocabulary and a fixed display
+   * order (both from `bridge.ts`), so the draft only ever records membership and
+   * the save path emits the canonical order.
+   */
+  const toggleThinkingLevel = (level: ComateExtraThinkingLevel): void => {
+    setDraftExtraLevels(current => {
+      const next = new Set(current)
+      if (!next.delete(level)) next.add(level)
+      return next
+    })
+  }
+
   const discard = (): void => {
     setDraftSid(null)
     setClearPending(false)
@@ -540,6 +642,8 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
     setDraftEnabled(new Set(savedEnabledIds))
     setDraftMaxTokens(String(savedMaxTokens))
     setDraftModelCaps(textCapDrafts(savedModelCaps))
+    setDraftAliases(textAliasDrafts(savedAliases))
+    setDraftExtraLevels(new Set(savedExtraLevels))
     setError(undefined)
     setSidNote(undefined)
   }
@@ -598,6 +702,10 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
         // change the WHOLE map goes out — that is how a cleared box removes its
         // key from the document.
         ...(modelCapsDirty ? { maxOutputTokensByModel: capDrafts.caps } : {}),
+        ...(aliasesDirty ? { modelAliases: Object.fromEntries(aliasDrafts) } : {}),
+        ...(extraLevelsDirty
+          ? { extraThinkingLevels: COMATE_EXTRA_THINKING_LEVELS.filter(level => draftExtraLevels.has(level)) }
+          : {}),
       })
       if (!mounted.current) return
       setDraftSid(null)
@@ -842,11 +950,40 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                                   disabled={!writable || saving}
                                   onChange={() => { toggleModel(model.id) }}
                                 />
-                                <span className="dsm-comate-model-name">{model.name}</span>
+                                {/* The alias only changes what this row PAINTS:
+                                    the id underneath (shown on the meta line
+                                    below, and used by every saved choice) never
+                                    moves. Empty box = keep the name Comate
+                                    reported, which is why clearing it undoes an
+                                    alias with no extra control. */}
+                                <span className="dsm-comate-model-name">
+                                  {(draftAliases[model.id] ?? '').trim() || model.name}
+                                </span>
                                 {model.multimodal
                                   ? <span className="dsm-comate-model-tag">{t('row.modelMultimodal')}</span>
                                   : null}
                               </label>
+                              {/* The alias box, to the left of the cap box: it is
+                                  the less dangerous of the two (a name cannot
+                                  break a request), so it sits closer to the row
+                                  it renames. */}
+                              <div className="dsm-comate-model-alias">
+                                <input
+                                  className="dsm-comate-input"
+                                  type="text"
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  aria-label={t('row.modelAliasAria', { model: model.name })}
+                                  title={t('row.modelAliasTitle')}
+                                  placeholder={model.name}
+                                  value={draftAliases[model.id] ?? ''}
+                                  disabled={!writable || saving}
+                                  onChange={event => {
+                                    const text = event.currentTarget.value
+                                    setDraftAliases(current => ({ ...current, [model.id]: text }))
+                                  }}
+                                />
+                              </div>
                               {/* One cap box per model. Empty = follow the default
                                   above (the placeholder shows that number), so an
                                   override can be undone by clearing the box —
@@ -885,6 +1022,32 @@ export function ComateCard({ t, settingsScope, view }: ComateCardProps) {
                           : t('row.modelCapHint', { global: savedMaxTokens })}
                       </p>
                     </>}
+              </section>
+              {/* The thinking levels, all three of them opt-in. They live below
+                  the model list because they are the rarest thing to change, and
+                  their copy has to carry two measured facts that are easy to get
+                  wrong: what each one really sends, and that `off` is not only a
+                  new row in the picker (see the locale copy). */}
+              <section className="dsm-comate-thinking">
+                <h3 className="dsm-comate-models-title">{t('row.thinkingTitle')}</h3>
+                <p className="dsm-comate-hint">
+                  {t('row.thinkingHint', { base: COMATE_BASE_THINKING_LEVELS.join(' / ') })}
+                </p>
+                <div className="dsm-comate-thinking-levels">
+                  {COMATE_EXTRA_THINKING_LEVELS.map(level => (
+                    <label className="dsm-comate-check" key={level}>
+                      <input
+                        type="checkbox"
+                        checked={draftExtraLevels.has(level)}
+                        disabled={!writable || saving}
+                        onChange={() => { toggleThinkingLevel(level) }}
+                      />
+                      <span>{t(THINKING_LEVEL_LABEL[level], { wire: COMATE_THINKING_LEVEL_WIRE[level] })}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="dsm-comate-hint">{t('row.thinkingOffHint')}</p>
+                <p className="dsm-comate-hint">{t('row.thinkingExtraHint')}</p>
               </section>
               <div className="dsm-comate-actions">
                 {savedFlash ? <p className="dsm-comate-saved">{t('row.saved')}</p> : null}

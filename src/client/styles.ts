@@ -74,6 +74,12 @@ export const COMATE_CARD_CSS = `
 .dsm-comate-model-main{display:flex;align-items:center;gap:10px}
 .dsm-comate-model-main .dsm-comate-model-row{flex:1;min-width:0}
 .dsm-comate-model-cap{display:flex;align-items:center;gap:6px;flex:none}
+/* 别名输入框：在名称与上限框之间，宽度固定且不参与收缩（名称那一侧已经 min-width:0）。
+   它比上限框宽一点——上限是数字，别名是文字。 */
+.dsm-comate-model-alias{display:flex;align-items:center;flex:none}
+.dsm-comate-model-alias .dsm-comate-input{width:132px;flex:none;padding:4px 8px;font-size:12px}
+.dsm-comate-thinking{display:flex;flex-direction:column;gap:8px}
+.dsm-comate-thinking-levels{display:flex;flex-direction:column;gap:6px}
 .dsm-comate-model-cap .dsm-comate-input{width:104px;flex:none;padding:4px 8px;font-size:12px}
 .dsm-comate-model-cap .dsm-comate-unit{font-size:11px}
 .dsm-comate-model-row{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--dsw-alias-label-primary,#e6e6e6);cursor:pointer}

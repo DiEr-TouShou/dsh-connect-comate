@@ -218,6 +218,13 @@ function registerCard(form) {
           'row.modelCapHint': '每个模型可以单独设上限：留空跟随上面的默认值（{global}）；0 表示这个模型不限制。',
           'row.modelCapInvalid': '有模型的输出上限填写不合法：请填 0 或正整数。',
           'row.modelCapAria': 'aria',
+          'row.modelAliasTitle': '该模型的显示名（留空则用 Comate 报的名字）',
+          'row.modelAliasAria': '{model} 的显示名（留空则用发现到的名字）',
+          'row.thinkingTitle': '思考档位（高级）',
+          'row.thinkingHint': '模型选择器默认只列出 {base} 四档；下面勾选的档位会追加到选择器里。',
+          'row.thinkingOff': 'Off（发送 reasoning_effort={wire}）',
+          'row.thinkingXhigh': 'Xhigh（发送 reasoning_effort={wire}）',
+          'row.thinkingMax': 'Max（发送 reasoning_effort={wire}）',
           'row.modelsTitle': '启用的模型',
           'row.selectAll': '全选',
           'row.selectNone': '全不选',
@@ -267,6 +274,29 @@ const capHint = (container) =>
 const capValues = (container) => capInputs(container).map(input => input.value)
 /** 每模型上限输入框的占位符（= 全局默认值）。 */
 const capPlaceholders = (container) => capInputs(container).map(input => input.placeholder)
+/** 每个模型的别名输入框，按列表顺序。 */
+const aliasInputs = (container) => [...container.querySelectorAll('.dsm-comate-model-alias input')]
+/** 别名框里现在显示的值。 */
+const aliasValues = (container) => aliasInputs(container).map(input => input.value)
+/** 别名框的占位符（= 上游报的名字，也是清空后回落到的东西）。 */
+const aliasPlaceholders = (container) => aliasInputs(container).map(input => input.placeholder)
+/**
+ * 每一行真正画出来的名字。
+ *
+ * 这条断言的意义在于「别名只改画什么」：名字从这里取，而 id、上限、已存的选择都
+ * 还挂在下面那个不变的 id 上。
+ */
+const paintedNames = (container) =>
+  [...container.querySelectorAll('.dsm-comate-model-name')].map(span => span.textContent)
+/** 思考档位勾选框，按卡片顺序（off / xhigh / max）。 */
+const levelBoxes = (container) =>
+  [...container.querySelectorAll('.dsm-comate-thinking-levels input[type=checkbox]')]
+const levelChecked = (container) => levelBoxes(container).map(input => input.checked)
+const levelLabels = (container) =>
+  [...container.querySelectorAll('.dsm-comate-thinking-levels .dsm-comate-check span')].map(span => span.textContent)
+/** 档位区第一条提示（写的是基础四档）。 */
+const thinkingHint = (container) =>
+  container.querySelector('.dsm-comate-thinking .dsm-comate-hint')?.textContent ?? ''
 /** 保存按钮的 disabled。 */
 const saveDisabled = (container) => buttonByText(container, '保存').disabled
 
@@ -471,9 +501,126 @@ console.log('\n12. 撤销修改把每模型草稿一起还原')
   expectEqual('回到已存的样子', capValues(container), ['4096', '', '', '', ''])
 }
 
+console.log('\n13. 别名：一行一个输入框，空着就显示上游给的名字')
+{
+  const { container } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  expectEqual('每行一个别名框', aliasInputs(container).length, CATALOG.length)
+  expectEqual('默认全空（都用上游名字）', aliasValues(container), ['', '', '', '', ''])
+  expectEqual('占位符 = 上游名字', aliasPlaceholders(container), CATALOG.map(model => model.name))
+  expectEqual('画出来的就是上游名字', paintedNames(container), CATALOG.map(model => model.name))
+  expectEqual('没改过时保存是禁用的', saveDisabled(container), true)
+}
+
+console.log('\n14. 改名、保存、退出、再进来')
+{
+  const first = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await typeInto(aliasInputs(first.container)[0], '快问快答')
+  expectEqual('敲完就能保存', saveDisabled(first.container), false)
+  expectEqual('名字当场就变了', paintedNames(first.container)[0], '快问快答')
+  await act(async () => { buttonByText(first.container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('只写了改名的那一个', first.host.stored.modelAliases, { [IDS[0]]: '快问快答' })
+  expectEqual('别的设置没被动', first.host.stored.maxOutputTokens, 32000)
+
+  const second = await open({ stored: { ...first.host.stored } })
+  expectEqual('再进来', aliasValues(second.container)[0], '快问快答')
+  expectEqual('再进来画的名字', paintedNames(second.container)[0], '快问快答')
+  expectEqual('没改过时又是禁用的', saveDisabled(second.container), true)
+}
+
+console.log('\n15. 清空一格 = 撤销别名（整张表重写）')
+{
+  const { container, host } = await open({
+    stored: {
+      wpsSid: 'enc:v1:x',
+      cookieOnly: false,
+      enabledModelIds: [],
+      maxOutputTokens: 32000,
+      modelAliases: { [IDS[0]]: 'A', [IDS[1]]: 'B' },
+    },
+  })
+  expectEqual('两个都读出来了', aliasValues(container).slice(0, 2), ['A', 'B'])
+  await typeInto(aliasInputs(container)[0], '')
+  expectEqual('清空后仍可保存', saveDisabled(container), false)
+  await act(async () => { buttonByText(container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('被清掉的那条真的没了', host.stored.modelAliases, { [IDS[1]]: 'B' })
+  expectEqual('画的名字回到上游名字', paintedNames(container)[0], CATALOG[0].name)
+}
+
+console.log('\n16. 思考档位：三个勾选框，默认全不勾')
+{
+  const { container } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  expectEqual('三个勾选框', levelBoxes(container).length, 3)
+  expectEqual('默认全不勾', levelChecked(container), [false, false, false])
+  expectEqual('标签把真正发出去的值写出来了', levelLabels(container), [
+    'Off（发送 reasoning_effort=off）',
+    'Xhigh（发送 reasoning_effort=xhigh）',
+    'Max（发送 reasoning_effort=max）',
+  ])
+  expectEqual('提示行写出基础四档', thinkingHint(container),
+    '模型选择器默认只列出 minimal / low / medium / high 四档；下面勾选的档位会追加到选择器里。')
+  expectEqual('没改过时保存是禁用的', saveDisabled(container), true)
+}
+
+console.log('\n17. 勾档位、保存、退出、再进来、再取消一个')
+{
+  const first = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await act(async () => { levelBoxes(first.container)[0].click() })
+  await act(async () => { levelBoxes(first.container)[2].click() })
+  expectEqual('草稿', levelChecked(first.container), [true, false, true])
+  await act(async () => { buttonByText(first.container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('落盘的顺序是词汇表顺序', first.host.stored.extraThinkingLevels, ['off', 'max'])
+
+  const second = await open({ stored: { ...first.host.stored } })
+  expectEqual('再进来', levelChecked(second.container), [true, false, true])
+  await act(async () => { levelBoxes(second.container)[1].click() })
+  await act(async () => { buttonByText(second.container, '保存').click() })
+  await act(async () => { await tick(30) })
+  expectEqual('补上一个后的落盘', second.host.stored.extraThinkingLevels, ['off', 'xhigh', 'max'])
+}
+
+console.log('\n18. 外部改动只重新播种「没被碰过」的别名与档位草稿')
+{
+  const { container, host } = await open({ stored: { wpsSid: 'enc:v1:x', cookieOnly: false, enabledModelIds: [], maxOutputTokens: 32000 } })
+  await act(async () => { host.external('modelAliases', { [IDS[0]]: '外部改的' }) })
+  await act(async () => { await tick(10) })
+  expectEqual('没碰过的别名草稿跟着变', aliasValues(container)[0], '外部改的')
+
+  await act(async () => { host.external('extraThinkingLevels', ['off']) })
+  await act(async () => { await tick(10) })
+  expectEqual('没碰过的档位草稿跟着变', levelChecked(container), [true, false, false])
+
+  await typeInto(aliasInputs(container)[1], '我改的')
+  await act(async () => { host.external('modelAliases', { [IDS[0]]: '又一次外部改的' }) })
+  await act(async () => { await tick(10) })
+  expectEqual('碰过的别名草稿保留', aliasValues(container).slice(0, 2), ['外部改的', '我改的'])
+}
+
+console.log('\n19. 撤销修改把别名与档位一起还原')
+{
+  const { container } = await open({
+    stored: {
+      wpsSid: 'enc:v1:x',
+      cookieOnly: false,
+      enabledModelIds: [],
+      maxOutputTokens: 32000,
+      modelAliases: { [IDS[0]]: 'A' },
+      extraThinkingLevels: ['xhigh'],
+    },
+  })
+  expectEqual('进来时读到的档位', levelChecked(container), [false, true, false])
+  await typeInto(aliasInputs(container)[1], 'B')
+  await act(async () => { levelBoxes(container)[0].click() })
+  await act(async () => { buttonByText(container, '撤销修改').click() })
+  expectEqual('别名回到已存的样子', aliasValues(container), ['A', '', '', '', ''])
+  expectEqual('档位回到已存的样子', levelChecked(container), [false, true, false])
+}
+
 console.log(`\n${checks - failures.length}/${checks} 条断言通过`)
 if (failures.length > 0) {
   console.error(`\n失败：\n   - ${failures.join('\n   - ')}\n`)
   process.exit(1)
 }
-console.log('卡片状态机（勾选 + 每模型上限）：OK\n')
+console.log('卡片状态机（勾选 + 每模型上限 + 别名 + 思考档位）：OK\n')

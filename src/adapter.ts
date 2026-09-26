@@ -30,6 +30,11 @@ import { COMATE_DEFAULT_MAX_TOKENS, COMATE_MULTIMODAL_TYPE, type ComateModel } f
 import type { ComateCatalog } from './catalog.ts'
 import { comateConfiguredMaxTokens, comateModelMaxTokens } from './max-tokens.ts'
 import type { ComateShim } from './shim.ts'
+import {
+  COMATE_THINKING_LEVEL_MAP,
+  buildThinkingLevelMap,
+  type ComateExtraThinkingLevel,
+} from './thinking-levels.ts'
 
 /** Provider route this bundle owns. */
 export const COMATE_PROVIDER = 'comate'
@@ -124,6 +129,24 @@ export interface ComateAdapterOptions {
    * Defaults to {@link COMATE_DEFAULT_MAX_TOKENS} when omitted.
    */
   maxOutputTokens?: (modelId: string) => number
+  /**
+   * Live read of one model's display-name alias, or `undefined` to keep the
+   * discovered name.
+   *
+   * Live for the same reason as {@link ComateAdapterOptions.maxOutputTokens},
+   * and it needs the same `invalidate()`: the name is baked into the descriptor
+   * `getModels()` returns, so a saved rename reaches the picker on the next
+   * catalog read rather than the next restart.
+   */
+  modelAlias?: (modelId: string) => string | undefined
+  /**
+   * Live read of the manually enabled extra thinking levels.
+   *
+   * Global rather than per model (one picker, one list), and empty means "offer
+   * exactly the base four" — see {@link ComateModelTuning}. Same `invalidate()`
+   * requirement: which levels exist is part of the descriptor too.
+   */
+  extraThinkingLevels?: () => readonly ComateExtraThinkingLevel[]
 }
 
 /** What {@link createComateAdapter} hands back. */
@@ -149,41 +172,34 @@ export function comateModelInput(model: ComateModel): ('text' | 'image')[] {
 /**
  * Thinking levels this route offers, and the wire value each one sends.
  *
- * Measured against the live gateway (2026-09, this machine), not guessed:
- *
- * - every value in the OpenAI `reasoning_effort` vocabulary is ACCEPTED (HTTP
- *   200, no 400) on `llmproxy/v1/user/chat/completions`;
- * - the no-parameter baseline ALWAYS returns `reasoning_content`, i.e. these
- *   models think by default;
- * - `'off'` genuinely turns thinking off — `reasoning_content` drops to zero
- *   chars on all five models probed (deepseek-v4-flash/-pro, MiniMax-M3,
- *   mimo-v2.5, mimo-v2.5-pro);
- * - `'high'` is the value the Comate desktop client itself sends;
- * - `xhigh` and `max` are accepted but their semantics for these models could
- *   not be established locally, so they are pinned to `null` (not offered)
- *   rather than presented as a level whose effect nobody measured.
- *
- * ## Why `off` is NOT offered, even though the gateway honours it
- *
- * `dsh-llm-pi-ai` rewrites an `off` choice to "omit the option" before pi-ai
- * ever sees it — `profileOptions()` does `reasoning === 'off' ? undefined :
- * reasoning` (`lib/index.js:1671`, fed from `resolveReasoningLevel(model,
- * options.reasoningEffort ?? profile.reasoning)` at :1847). So an `off` entry
- * here would never be consulted: the request would carry no reasoning
- * parameter, the gateway would keep thinking ON (its measured default), and the
- * picker would have said "off". That is a lie about behaviour, so `off` is
- * pinned to `null` and the honest "send nothing" choice is the picker's own
- * "provider default".
+ * The table itself lives in `./thinking-levels.ts` (re-exported here because
+ * this is the module a reader of the model descriptors lands on); the measured
+ * facts behind each wire value — why `off` is spelled `'off'` and not `'none'`,
+ * why `xhigh`/`max` are opt-in, and why offering `off` also changes what an
+ * unnamed effort means — are documented once, on
+ * `COMATE_THINKING_LEVEL_WIRE` in `bridge.ts`.
  */
-export const COMATE_THINKING_LEVEL_MAP = {
-  off: null,
-  minimal: 'minimal',
-  low: 'low',
-  medium: 'medium',
-  high: 'high',
-  xhigh: null,
-  max: null,
-} as const
+export { COMATE_THINKING_LEVEL_MAP }
+
+/**
+ * The two per-model knobs that are not part of the discovered catalog.
+ *
+ * Both are already RESOLVED by the caller: the adapter takes values, not
+ * settings fields, so the parsing rules (and their warnings) stay in one place
+ * and the descriptor stays a pure function of what it is handed.
+ */
+export interface ComateModelTuning {
+  /** Display-name override; `undefined` keeps the discovered name. */
+  alias?: string | undefined
+  /**
+   * Manually enabled extra thinking levels.
+   *
+   * Empty or omitted means "offer exactly the base four" and reuses the frozen
+   * {@link COMATE_THINKING_LEVEL_MAP} object identity — so a deployment that
+   * turns nothing on gets the 0.4.1-rc.2 descriptor byte for byte.
+   */
+  extraThinkingLevels?: readonly ComateExtraThinkingLevel[] | undefined
+}
 
 /**
  * Build one pi-ai model descriptor pointing at the loopback shim.
@@ -197,16 +213,24 @@ export const COMATE_THINKING_LEVEL_MAP = {
  * @param maxOutputTokens - the resolved output cap; `0` means "no cap", spelled
  * here as the model's own window because pi-ai refuses a non-positive
  * `maxTokens` (see `comateModelMaxTokens`).
+ * @param tuning - the per-model display name and the route's extra thinking
+ * levels; see {@link ComateModelTuning}.
  * @returns the pi-ai model descriptor.
  */
 export function comatePiModel(
   info: ComateModel,
   baseUrl: string,
   maxOutputTokens: number = COMATE_DEFAULT_MAX_TOKENS,
+  tuning: ComateModelTuning = {},
 ): Model<Api> {
+  const extra = tuning.extraThinkingLevels ?? []
   return {
     id: info.id,
-    name: info.name,
+    // The alias only ever changes what the picker PAINTS. `id` above is what a
+    // request, a `maxOutputTokensByModel` entry and `agent-default-model` all
+    // address this model by, so renaming one can never invalidate a saved
+    // choice — see `model-alias.ts`.
+    name: tuning.alias ?? info.name,
     api: 'openai-completions',
     provider: COMATE_PROVIDER,
     baseUrl,
@@ -218,7 +242,7 @@ export function comatePiModel(
     // always returned `reasoning_content`), and all of them accept the effort
     // parameter, so the capability is declared rather than withheld.
     reasoning: true,
-    thinkingLevelMap: COMATE_THINKING_LEVEL_MAP,
+    thinkingLevelMap: extra.length === 0 ? COMATE_THINKING_LEVEL_MAP : buildThinkingLevelMap(extra),
     compat: {
       supportsReasoningEffort: true,
       // Named explicitly: pi-ai otherwise auto-detects the reasoning wire format
@@ -256,7 +280,13 @@ export function createComateAdapter(options: ComateAdapterOptions): ComateAdapte
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => comatePiModel(info, baseUrl, outputCap(info.id)))
+    // Read once per build, not once per model: the level list is global, and a
+    // per-model read would let one snapshot contain two different answers.
+    const extraThinkingLevels = options.extraThinkingLevels?.() ?? []
+    return catalog.current().map(info => comatePiModel(info, baseUrl, outputCap(info.id), {
+      alias: options.modelAlias?.(info.id),
+      extraThinkingLevels,
+    }))
   }
 
   const base = createProvider({

@@ -31,6 +31,8 @@ import {
   type ComateSealAnswer,
   type ComateSettingsValue,
 } from '../bridge.ts'
+import { parseModelAliases } from '../model-alias.ts'
+import { parseExtraThinkingLevels } from '../thinking-levels.ts'
 
 /** One settings form's synchronous snapshot, as both lines shape it. */
 export interface ComateSettingsSnapshot {
@@ -137,6 +139,22 @@ export interface ComateSettingsPatch {
    * document.
    */
   maxOutputTokensByModel?: Readonly<Record<string, number>>
+  /**
+   * Display-name overrides, keyed by model id.
+   *
+   * A full map on every save that touched it, like the cap map above: an alias
+   * is removed by dropping its key, and a model with no key keeps the name
+   * Comate reported.
+   */
+  modelAliases?: Readonly<Record<string, string>>
+  /**
+   * Extra thinking levels to offer in the picker, on top of the base four.
+   *
+   * Written as the card's checkbox state — the whole list every time, so
+   * unchecking a level removes it. Only the levels listed are added; the base
+   * four are not addressable from here.
+   */
+  extraThinkingLevels?: readonly string[]
 }
 
 /**
@@ -249,6 +267,33 @@ export function readComateValue(form: ComateSettingsForm | undefined): ComateSet
     }
     if (Object.keys(caps).length > 0) value.maxOutputTokensByModel = caps
   }
+  // Aliases are strings one level down, and blank is NOT a value here: a key
+  // whose text is empty means "no alias", so it must read as unset rather than
+  // reach the save path as an empty name. Same drop-one-bad-entry rule as caps.
+  const aliases = unwrapVolatile(section.modelAliases)
+  if (aliases !== null && typeof aliases === 'object' && !Array.isArray(aliases)) {
+    // Unwrap one level down BEFORE parsing — `asVolatile(z.dict(...))` may hand
+    // each value over as a live reference — and then let the SHARED parser decide
+    // what is a usable alias. Trimming, and "a blank value is no alias", are one
+    // rule with one home (`model-alias.ts`), because the card writes with that
+    // rule and this reads with it; two spellings would let them drift.
+    const plain = Object.fromEntries(
+      Object.entries(aliases as Record<string, unknown>).map(([id, raw]) => [id, unwrapVolatile(raw)]),
+    )
+    const names = parseModelAliases(plain)
+    if (names.size > 0) value.modelAliases = Object.fromEntries(names)
+  }
+  // The level list goes through the SHARED parser as well, and for a second
+  // reason beyond "one rule, one home": the save path compares the stored value
+  // against what the card wrote, and the card writes the canonical subset in the
+  // vocabulary's own order. Reading the document's raw spelling here
+  // (`['off','off','xhight']`) would make that compare report "did not persist"
+  // for a document the user hand-edited — a verdict they could not act on.
+  const levels = unwrapVolatile(section.extraThinkingLevels)
+  if (Array.isArray(levels)) {
+    const named = parseExtraThinkingLevels(levels.map(unwrapVolatile))
+    if (named.length > 0) value.extraThinkingLevels = [...named]
+  }
   return value
 }
 
@@ -269,6 +314,22 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 function sameCapMap(
   left: Readonly<Record<string, number>>,
   right: Readonly<Record<string, number>>,
+): boolean {
+  const ids = Object.keys(left)
+  if (ids.length !== Object.keys(right).length) return false
+  return ids.every(id => left[id] === right[id])
+}
+
+/**
+ * Whether two string maps say the same thing.
+ *
+ * Key order is not part of the value's meaning, so it is not part of the test:
+ * a map the Host re-serialized in another order is the same setting, and a false
+ * "did not persist" verdict would be unactionable for the user.
+ */
+function sameStringMap(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
 ): boolean {
   const ids = Object.keys(left)
   if (ids.length !== Object.keys(right).length) return false
@@ -327,6 +388,12 @@ export async function writeComateSettings(
   if (patch.maxOutputTokensByModel !== undefined) {
     await writeField(form, 'maxOutputTokensByModel', { ...patch.maxOutputTokensByModel })
   }
+  if (patch.modelAliases !== undefined) {
+    await writeField(form, 'modelAliases', { ...patch.modelAliases })
+  }
+  if (patch.extraThinkingLevels !== undefined) {
+    await writeField(form, 'extraThinkingLevels', [...patch.extraThinkingLevels])
+  }
 
   await afterWriteSettles()
   const saved = readComateValue(form)
@@ -359,6 +426,26 @@ export async function writeComateSettings(
       'not-persisted',
       'maxOutputTokensByModel',
       'settings field "maxOutputTokensByModel" was not persisted',
+    )
+  }
+  // `sameStringMap`, not a byte compare: the Host may re-serialize the map in its
+  // own key order, and "did not persist" must mean the VALUE differs.
+  if (patch.modelAliases !== undefined
+    && !sameStringMap(saved.modelAliases ?? {}, patch.modelAliases)) {
+    throw new ComateSettingsWriteError(
+      'not-persisted',
+      'modelAliases',
+      'settings field "modelAliases" was not persisted',
+    )
+  }
+  // Order-insensitive for the same reason, plus the host may have collapsed
+  // duplicates: this field is a set of levels.
+  if (patch.extraThinkingLevels !== undefined
+    && !sameStringSet(saved.extraThinkingLevels ?? [], patch.extraThinkingLevels)) {
+    throw new ComateSettingsWriteError(
+      'not-persisted',
+      'extraThinkingLevels',
+      'settings field "extraThinkingLevels" was not persisted',
     )
   }
 }

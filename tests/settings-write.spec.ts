@@ -52,6 +52,8 @@ function fakeForm(initial: Record<string, unknown>, options: FormOptions = {}): 
             enabledModelIds: live(stored.enabledModelIds),
             maxOutputTokens: live(stored.maxOutputTokens),
             maxOutputTokensByModel: live(stored.maxOutputTokensByModel),
+            modelAliases: live(stored.modelAliases),
+            extraThinkingLevels: live(stored.extraThinkingLevels),
           }
       return { status: 'ready', writable: options.writable ?? true, value }
     },
@@ -111,6 +113,42 @@ describe('readComateValue', () => {
   it('reads anything that is not a map as "no overrides"', () => {
     for (const bad of [undefined, null, 'x', 42, ['a'], true]) {
       expect(readComateValue(fakeForm({ maxOutputTokensByModel: bad }, { liveRefs: false })).maxOutputTokensByModel,
+        `value=${String(bad)}`).toBeUndefined()
+    }
+  })
+
+  it('reads the alias map through its live references', () => {
+    // 每一条别名也是活引用：不剥的话读回来的是 `{get: ...}`，而卡片会把它当名字画
+    // 出去——或者更早一步，在 `parseModelAliases` 里被当垃圾丢掉。
+    const form = fakeForm({ modelAliases: { a: '快问快答', b: '  Trimmed  ' } })
+    expect(readComateValue(form).modelAliases).toEqual({ a: '快问快答', b: 'Trimmed' })
+  })
+
+  it('drops a blank alias and an unusable one instead of the whole map', () => {
+    // 空串是「没有别名」（卡片清空输入框就是这样落盘的），不是「名字为空」：留着它
+    // 会让选择器画出一个没名字的模型。
+    const form = fakeForm({ modelAliases: { a: 'A', b: '', c: '   ', d: 7 } }, { liveRefs: false })
+    expect(readComateValue(form).modelAliases).toEqual({ a: 'A' })
+  })
+
+  it('reads anything that is not a map as "no aliases"', () => {
+    for (const bad of [undefined, null, 'x', 42, ['a'], true]) {
+      expect(readComateValue(fakeForm({ modelAliases: bad }, { liveRefs: false })).modelAliases,
+        `value=${String(bad)}`).toBeUndefined()
+    }
+  })
+
+  it('reads the extra levels, canonicalized', () => {
+    // 手写的文档里可能有重复、有拼错、有顺序不同，读回来的必须是同一张干净的表：
+    // 存进去什么顺序、读回来什么顺序，否则「保存后显示没勾上」这种没法处理的提示
+    // 就会出现在一份其实没问题的设置上。
+    const form = fakeForm({ extraThinkingLevels: ['max', 'off', 'off', 'xhight'] })
+    expect(readComateValue(form).extraThinkingLevels).toEqual(['off', 'max'])
+  })
+
+  it('reads anything that is not a list as "nothing turned on"', () => {
+    for (const bad of [undefined, null, 'off', 42, { off: true }]) {
+      expect(readComateValue(fakeForm({ extraThinkingLevels: bad }, { liveRefs: false })).extraThinkingLevels,
         `value=${String(bad)}`).toBeUndefined()
     }
   })
@@ -316,6 +354,95 @@ describe('writeComateSettings', () => {
     await expect(writeComateSettings(form, { cookieOnly: true })).resolves.toBeUndefined()
     expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly'])
     expect(readComateValue(form).maxOutputTokens).toBe(4096)
+  })
+
+  it('writes the alias map and verifies it', async () => {
+    const form = fakeForm({})
+    await expect(writeComateSettings(form, { modelAliases: { a: '快问快答', b: 'B' } })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['modelAliases', { a: '快问快答', b: 'B' }]])
+    expect(readComateValue(form).modelAliases).toEqual({ a: '快问快答', b: 'B' })
+  })
+
+  it('removes an alias by writing a map without it', async () => {
+    // 清空一格的落盘方式：整张 map 重写，少掉的那个键才真的消失（而不是存个空串）。
+    const form = fakeForm({ modelAliases: { a: 'A', b: 'B' } })
+    await expect(writeComateSettings(form, { modelAliases: { b: 'B' } })).resolves.toBeUndefined()
+    expect(readComateValue(form).modelAliases).toEqual({ b: 'B' })
+  })
+
+  it('accepts an empty alias map as "no aliases at all"', async () => {
+    const form = fakeForm({ modelAliases: { a: 'A' } })
+    await expect(writeComateSettings(form, { modelAliases: {} })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['modelAliases', {}]])
+    expect(readComateValue(form).modelAliases).toBeUndefined()
+  })
+
+  it('raises not-persisted when an alias came back different', async () => {
+    const form = fakeForm({}, { swallow: true })
+    form.put({ modelAliases: { a: 'A' } })
+    const failure = await writeComateSettings(form, { modelAliases: { a: 'B' } })
+      .catch((error: unknown) => error)
+    expect((failure as ComateSettingsWriteError).code).toBe('not-persisted')
+    expect((failure as ComateSettingsWriteError).field).toBe('modelAliases')
+  })
+
+  it('accepts a re-ordered alias map as persisted', async () => {
+    // 宿主可能按自己的键序重新序列化：那还是同一份设置，不能报「没存上」。
+    const form = fakeForm({ modelAliases: { b: 'B', a: 'A' } })
+    await expect(writeComateSettings(form, { modelAliases: { a: 'A', b: 'B' } })).resolves.toBeUndefined()
+  })
+
+  it('does not hand the Host the caller own alias object', async () => {
+    const form = fakeForm({})
+    const patch = { modelAliases: { a: 'A' } }
+    await expect(writeComateSettings(form, patch)).resolves.toBeUndefined()
+    expect(form.calls[0]![1]).not.toBe(patch.modelAliases)
+    expect(form.calls[0]![1]).toEqual({ a: 'A' })
+  })
+
+  it('leaves the stored aliases alone when the patch omits them', async () => {
+    const form = fakeForm({ modelAliases: { a: 'A' }, enabledModelIds: [] })
+    await expect(writeComateSettings(form, { cookieOnly: true })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly'])
+    expect(readComateValue(form).modelAliases).toEqual({ a: 'A' })
+  })
+
+  it('writes the extra levels and verifies them', async () => {
+    const form = fakeForm({})
+    await expect(writeComateSettings(form, { extraThinkingLevels: ['off', 'max'] })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['extraThinkingLevels', ['off', 'max']]])
+    expect(readComateValue(form).extraThinkingLevels).toEqual(['off', 'max'])
+  })
+
+  it('compares extra levels as a set, not a sequence', async () => {
+    // 宿主回读的顺序不该决定「存上了没有」：这是一个集合，不是列表。
+    const form = fakeForm({ extraThinkingLevels: ['max', 'off'] })
+    await expect(writeComateSettings(form, { extraThinkingLevels: ['off', 'max'] })).resolves.toBeUndefined()
+  })
+
+  it('accepts an empty level list as "nothing turned on"', async () => {
+    // 三个勾选框全取消就是这样落盘的：写空表，而不是「什么都不写」（后者会留下
+    // 上一轮的档位，用户看到的是「取消不了」）。
+    const form = fakeForm({ extraThinkingLevels: ['off'] })
+    await expect(writeComateSettings(form, { extraThinkingLevels: [] })).resolves.toBeUndefined()
+    expect(form.calls).toEqual([['extraThinkingLevels', []]])
+    expect(readComateValue(form).extraThinkingLevels).toBeUndefined()
+  })
+
+  it('raises not-persisted when a level came back different', async () => {
+    const form = fakeForm({}, { swallow: true })
+    form.put({ extraThinkingLevels: ['off'] })
+    const failure = await writeComateSettings(form, { extraThinkingLevels: ['max'] })
+      .catch((error: unknown) => error)
+    expect((failure as ComateSettingsWriteError).code).toBe('not-persisted')
+    expect((failure as ComateSettingsWriteError).field).toBe('extraThinkingLevels')
+  })
+
+  it('leaves the stored levels alone when the patch omits them', async () => {
+    const form = fakeForm({ extraThinkingLevels: ['off'], enabledModelIds: [] })
+    await expect(writeComateSettings(form, { cookieOnly: true })).resolves.toBeUndefined()
+    expect(form.calls.map(([field]) => field)).toEqual(['cookieOnly'])
+    expect(readComateValue(form).extraThinkingLevels).toEqual(['off'])
   })
 })
 
