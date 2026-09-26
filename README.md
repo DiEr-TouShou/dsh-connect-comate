@@ -203,6 +203,11 @@ pnpm run verify:media
 # （它可能是指向已安装 profile 的链接），用 DSH_COMATE_CARD_DEPS 指向别的目录。
 # COMATE_PLUGIN_DIR=<插件安装目录> 则改为验安装产物（同 verify:sid-cipher）
 pnpm run build && pnpm run verify:card
+
+# 发版门禁：tag 里必须真的带着构建产物 lib/。缺了它，git 安装又要现场构建，
+# 于是又要 allowBuilds 白名单 + PATH 上有 pnpm（见「安装」一节）。不碰网络，只读 git。
+pnpm run verify:release-tag
+pnpm run verify:release-tag -- v0.5.1 --remote   # 指定 tag，并确认 origin 已推
 ```
 
 `verify:shim` 默认只打 `mimo-v2.5`（修复前唯一失败的模型），要全矩阵就加
@@ -296,10 +301,17 @@ trim 后为空的键或值都不进表（空串不是「把名字改空」，而
 dsh plugin --profile <web|desktop|dsh-tui> add github:DiEr-TouShou/dsh-connect-comate
 ```
 
-要固定版本，可带 tag：`github:DiEr-TouShou/dsh-connect-comate#v0.4.2`（`lib/` 是构建产物、不入库，带 tag 也照常触发构建）。
+要固定版本，可带 tag：`github:DiEr-TouShou/dsh-connect-comate#v0.5.1`。
 
-仓库只提交源码（`lib/` 是构建产物，不入库），所以这一步会在克隆后自动执行 `prepare` → `tsdown`。
-DSH 会把它作为**待批准的构建脚本**列出，在插件面板确认一次即可。
+仓库**同时提交 `lib/` 构建产物**（0.5.1 起），所以 git 安装**不需要现场构建**，也就
+**不需要 `allowBuilds` 白名单、不要求 PATH 上有 pnpm/npm**。
+
+> 若安装时仍被要求「批准构建脚本」，或报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` /
+> `ERR_PNPM_PREPARE_PACKAGE` / `'pnpm' 不是内部或外部命令`，说明装的是 0.5.1 **之前**的
+> tag —— 那些 tag 里没有 `lib/`，只能靠 `prepare` → `tsdown` 现场构建，于是必须过白名单，
+> 而白名单键是**绑 commit sha 的长 key**（形如
+> `dsh-connect-comate@https://codeload.github.com/…/tar.gz/<sha>: true`，裸写包名无效）。
+> 升级到 `v0.5.1` 及以上即可彻底绕开这两道门。回归由 `pnpm run verify:release-tag` 守住。
 
 > 本仓库由 `bakasbk/dsh-connect-comate` 迁出，原仓库保留为 upstream。
 
@@ -361,9 +373,14 @@ curl -X POST -H 'content-type: application/json' \
 ## 开发
 
 ```sh
-pnpm install     # 装完后会自动跑一次构建（package.json 的 prepare 脚本，供 git 安装使用）
+pnpm install     # 0.5.1 起没有 prepare 钩子，装完**不会**自动构建（这是刻意的：
+                 # 正是 prepare 让 git 安装必须过 allowBuilds 白名单）
+pnpm run build   # 显式构建一次，产出 lib/（本地路径安装与各 verify:* 都依赖它）
 pnpm run check   # typecheck + test + build
 ```
+
+改了 `src/` 之后记得 `pnpm run build` 并把 `lib/` **一起提交**——`lib/` 已入库，忘带就会
+让 tag 里躺着一份旧产物（`pnpm run verify:release-tag` 会逐字节比对并报出来）。
 
 本地改码后重启 DSH 进程生效。环境变量：
 

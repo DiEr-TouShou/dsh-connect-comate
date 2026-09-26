@@ -1,8 +1,11 @@
 node_modules/
 .pnpm-store/
-lib/
 coverage/
 *.log
 .env
 .DS_Store
 *.tsbuildinfo
+# 注意：`lib/` 是**故意**提交的构建产物，不要加回忽略列表。
+# git 依赖（`github:` 形式）在安装时会现场构建，而现场构建要求
+# `allowBuilds` 白名单 + PATH 上有 pnpm；把产物进 tag 才能让两者都不再被需要。
+# 回归由 `pnpm run verify:release-tag` 守住。
