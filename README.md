@@ -252,7 +252,7 @@ trim 后为空的键或值都不进表（空串不是「把名字改空」，而
 dsh plugin --profile <web|desktop|dsh-tui> add github:DiEr-TouShou/dsh-connect-comate
 ```
 
-要固定版本，可带 tag：`github:DiEr-TouShou/dsh-connect-comate#v0.4.0`（`lib/` 是构建产物、不入库，带 tag 也照常触发构建）。
+要固定版本，可带 tag：`github:DiEr-TouShou/dsh-connect-comate#v0.4.1`（`lib/` 是构建产物、不入库，带 tag 也照常触发构建）。
 
 仓库只提交源码（`lib/` 是构建产物，不入库），所以这一步会在克隆后自动执行 `prepare` → `tsdown`。
 DSH 会把它作为**待批准的构建脚本**列出，在插件面板确认一次即可。
