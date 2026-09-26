@@ -154,7 +154,10 @@ add(
 
 // 6) files 白名单
 const filesList = Array.isArray(tagPkg.files) ? tagPkg.files.map((f) => String(f).replace(/^\.\//, '')) : []
-const filesMissing = filesList.filter((f) => !tagFiles.has(f) && !tagFiles.has(`${f}/`))
+// `files` 条目可以是文件，也可以是**目录**；而 `ls-tree -r` 只列文件，
+// 所以目录要按前缀判（`lib` 对应 `lib/index.js`…）。
+const inTag = (entry) => tagFiles.has(entry) || [...tagFiles].some((p) => p.startsWith(`${entry}/`))
+const filesMissing = filesList.filter((f) => !inTag(f))
 add(
   'files 白名单含 lib 且条目都在 tag 内',
   filesList.includes('lib') && filesMissing.length === 0,
