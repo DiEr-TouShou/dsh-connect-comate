@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.5.1 (2026-09-26)
+
+> 一条**打包方式**的改动，**插件运行时行为一字未变**（`src/`、`cordis.patch.yml` 未触及，
+> 单测基线不动）：把 `lib/` 构建产物提交进仓库、删掉 `prepare` 钩子。起因是一次真实安装
+> 事故 —— 在干净机器（Windows 虚拟机）上装 `#v0.5.1-rc.1` 连撞两堵墙：先是
+> `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`（要 `allowBuilds` 白名单），照提示放行后又
+> `ERR_PNPM_PREPARE_PACKAGE` + `'pnpm' 不是内部或外部命令`。两堵墙是**同一个根因**：
+> git 依赖需要现场构建。0.5.1 = 0.5.0 之后（含 0.5.1-rc.1）的**全部**改动。
+> 已打 tag `v0.5.1` 并推 origin；安装：`github:DiEr-TouShou/dsh-connect-comate#v0.5.1`。未上 npm。
+
+### Build / Packaging
+
+- **git 安装不再需要现场构建**（`package.json` / `.gitignore` / `lib/`）。pnpm 11.7 的
+  `packageShouldBeBuilt()` 判定顺序是：`scripts.prepare` 非空 → **需要构建**（短路，后面
+  的判断都不看）；否则若有 `prepack`/`prepublish`/`publish` → 看 `main` 指向的文件**是否
+  已在包内**，在则不需要构建。此前 `lib/` 被 `.gitignore` 忽略、`prepare` 又非空，于是
+  每一次 git 安装都必然落入「需要构建」分支，连带两条环境要求：
+  - `allowBuilds` 白名单 —— 键是**绑 commit sha 的长 key**（形如
+    `dsh-connect-comate@https://codeload.github.com/…/tar.gz/<sha>: true`）；裸写包名无效
+    （git 依赖的 `nonSemverVersion` 非空，`trustPackageIdentity` 落为 false，走精确匹配）；
+  - PATH 上必须存在 `pnpm` —— `preferred-pm` 因仓库跟踪了 `pnpm-lock.yaml` 而选中 pnpm，
+    pnpm 会在临时目录里跑 `pnpm install`；而 DSH 自带的 `resources/runtime/bin` 只暴露
+    `node`/`node.cmd`，没有 `pnpm`。
+
+  现在 `lib/` 进 tag、`prepare` 删除 → 判定早退 → 两者都不再被需要。`prepack` 保留，
+  将来上 npm registry 时发布包仍会先构建一次。
+- **发版门禁 `verify:release-tag`**（`scripts/verify-release-tag.mjs`，零依赖、只读 git，
+  默认校验 `v<package.json version>`）：9 项检查把上面两个根因钉死 —— tag 内必须存在
+  `main` 指向的 `lib/index.js`、tag 内 `package.json` 不得有非空 `prepare`；另含 `bin` 目标
+  齐全、`files` 白名单含 `lib`、tag 名与 tag 内 `version` 一致、工作树 `lib/` **未被**
+  `.gitignore` 忽略、**tag 内 `lib/` 与工作树 `lib/` 逐字节一致**（防提交一份旧产物）、
+  以及 `--remote` 时确认 origin 已推。
+- **代价（已写进 README「开发」）**：`pnpm install` 不再自动构建，克隆后需显式
+  `pnpm run build`；改了 `src/` 之后要把 `lib/` **一起提交**。README 的「安装」一节同步
+  改写：git 安装不需要批准构建脚本，若仍被要求批准，说明装的是 0.5.1 之前的 tag。
+
+### 验收
+
+- `pnpm run typecheck` 两条 tsconfig 无错；`pnpm run test` **414 测试绿**（与 0.5.0 同基线，
+  本次未动 `src/`，单测无需增删）。
+- **门禁反向对照**：`node scripts/verify-release-tag.mjs v0.5.1-rc.1` → **2/8 FAIL**，失败项
+  正是那两条根因（`lib/index.js` 缺失、`prepare` 非空），证明门禁有效而不是装饰。
+- **干净机器复现**：另建一个**没有 `allowBuilds` 任何条目**的临时项目，用 **DSH 自带的
+  pnpm 11.7.0** 安装该 commit 的 `github:` 依赖，且把 PATH 削到只剩 `node` 与 `git`
+  （`pnpm`/`npm` 都解析不到，复刻虚拟机条件）——
+  `pnpm install` **exit 0**、`+ dsh-connect-comate 0.5.1`、`Done in 4.2s`，日志里
+  `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_PREPARE_PACKAGE` / `不是内部或外部命令`
+  **一次都没出现**。
+- **装出来的是预构建产物，不是现场构建的**：安装树里 `lib/` 六个文件与仓库提交的 blob
+  **逐字节一致**（`index.js` = `f56e60b7…`、`bin.js` = `30ed8242…`、`client.js` = `c69ee19e…`、
+  `index.d.ts` = `3d161c97…`、`bin.d.ts` = `f522f3cc…`、`version-BJtfo7Fd.js` = `9374ed6f…`）；
+  安装产物的 `package.json` 里 `version = 0.5.1`、`prepare = undefined`。
+- 装进本机 desktop profile 后：`verify:installed` 与真机 `verify:shim` 均通过（真凭据、真上游）。
+
 ## 0.5.1-rc.1 (2026-09-26)
 
 > 一条**开发期工具**的固化，**插件运行时行为一字未变**。上一轮为了探清「WPS Comate 怎么
